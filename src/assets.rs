@@ -36,6 +36,9 @@ gpui_kit::assets::icon_assets!(
         CalendarCheck,
         BookText,
         Library,
+        MessageSquare,
+        TextAlignStart,
+        ListChecks,
     ]
 );
 

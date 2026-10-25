@@ -25,8 +25,8 @@ use crate::timer::TimerState;
 use crate::ui::format::ago_long;
 use crate::ui::item::{Item, ItemEvent};
 use crate::ui::widgets::{
-    dot, field_row, html_to_markdown, human_day, parse_day, picker, priority_color, quick_dates,
-    rich_text,
+    avatar, dot, field_cell, html_to_markdown, human_day, parse_day, picker, priority_color,
+    quick_dates, rich_text, status_color,
 };
 use gpui_kit::Task;
 
@@ -60,6 +60,7 @@ pub struct TaskView {
     reminder_date: Entity<InputState>,
     focus_handle: FocusHandle,
     scroll: ScrollHandle,
+    comments_scroll: ScrollHandle,
     _subscriptions: Vec<Subscription>,
     _tasks: Vec<Task<()>>,
 }
@@ -76,7 +77,7 @@ impl TaskView {
         let new_checklist = cx.new(|cx| InputState::new(window, cx).placeholder("New checklist…"));
         let comment = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("Write a comment — ⌘⏎ to send")
+                .placeholder("Write a comment…")
                 .auto_grow(2, 10)
         });
         let reminder_date =
@@ -109,6 +110,7 @@ impl TaskView {
             reminder_date,
             focus_handle: cx.focus_handle(),
             scroll: ScrollHandle::new(),
+            comments_scroll: ScrollHandle::new(),
             _subscriptions: subscriptions,
             _tasks: Vec::new(),
         };
@@ -142,7 +144,7 @@ impl TaskView {
                         this.load_error = None;
                         this.set_task(task, window, cx);
                         this.set_checklists(checklists, window, cx);
-                        this.thread = thread;
+                        this.set_thread(thread);
                         this.reminders = reminders;
                     }
                     Err(e) if e.is_auth() => cx.emit(TaskViewEvent::AuthFailed(e)),
@@ -195,6 +197,16 @@ impl TaskView {
             }
         }
         self.checklists = checklists;
+    }
+
+    /// The newest comment is at the bottom: keep it in view when the
+    /// thread grows, as a chat would.
+    fn set_thread(&mut self, thread: Option<Thread>) {
+        let count = |t: &Option<Thread>| t.as_ref().map_or(0, |t| t.messages.len());
+        if count(&thread) != count(&self.thread) {
+            self.comments_scroll.scroll_to_bottom();
+        }
+        self.thread = thread;
     }
 
     /// Runs `call` in the background, then hands its result to `done` on the
@@ -436,7 +448,7 @@ impl TaskView {
                 c.comments(org, id)
             },
             |this, thread, _, cx| {
-                this.thread = Some(thread);
+                this.set_thread(Some(thread));
                 cx.notify();
             },
         );
@@ -751,95 +763,139 @@ impl TaskView {
             }
         };
 
-        v_flex()
-            .gap_0p5()
-            .child(field_row(
-                "Status",
-                value(
-                    "status",
-                    status_label(&task.status).to_owned(),
-                    statuses,
-                    Some(task.status.clone()),
-                    Box::new(set("status")),
-                ),
-                cx,
-            ))
-            .child(field_row(
-                "Priority",
-                value(
-                    "priority",
-                    priority_label(&task.priority).to_owned(),
-                    priorities,
-                    Some(task.priority.clone()),
-                    Box::new(set("priority")),
-                ),
-                cx,
-            ))
-            .child(field_row(
-                "Owner",
-                value(
-                    "owner",
-                    person_label(&task.owner),
-                    people.clone(),
-                    task.owner.as_ref().map(|p| p.id.clone()),
-                    Box::new(set("owner_user_id")),
-                ),
-                cx,
-            ))
-            .child(field_row(
-                "Who acts next",
-                value(
-                    "action",
-                    person_label(&task.action_required),
-                    people,
-                    task.action_required.as_ref().map(|p| p.id.clone()),
-                    Box::new(set("action_required_user_id")),
-                ),
-                cx,
-            ))
-            .child(field_row(
-                "Project",
-                value(
-                    "project",
-                    task.project_name
-                        .clone()
-                        .unwrap_or_else(|| "No project".into()),
-                    projects,
-                    task.project_id.clone(),
-                    Box::new(set("project_id")),
-                ),
-                cx,
-            ))
-            .child(field_row(
-                "Due",
-                value(
-                    "due",
-                    task.due_on
-                        .as_deref()
-                        .map(human_day)
-                        .unwrap_or_else(|| "No due date".into()),
-                    std::iter::once((String::new(), "No due date".to_owned()))
-                        .chain(quick_dates().into_iter().map(|(l, d)| (d, l.to_owned())))
-                        .collect(),
-                    task.due_on.clone(),
-                    Box::new(set("due_on")),
-                ),
-                cx,
-            ))
-            .child(field_row(
-                "My planner",
-                picker(
-                    "planner",
-                    task.planner_bucket
-                        .as_deref()
-                        .and_then(|b| BUCKETS.iter().find(|(k, _)| *k == b).map(|(_, l)| *l))
-                        .unwrap_or("Not planned"),
-                    buckets,
-                    task.planner_bucket.clone(),
-                    plan,
-                ),
-                cx,
-            ))
+        let theme = cx.theme().clone();
+        let status = status_color(&task.status, &theme);
+        let person = |p: &Option<Person>| -> AnyElement {
+            match p {
+                Some(p) => avatar(&p.name(), px(18.), &theme).into_any_element(),
+                None => div().into_any_element(),
+            }
+        };
+        let today = chrono::Local::now()
+            .date_naive()
+            .format("%Y-%m-%d")
+            .to_string();
+        let due_color = match task.due_on.as_deref() {
+            Some(d) if task.is_open && d < today.as_str() => Some(theme.red),
+            Some(d) if task.is_open && d == today => Some(theme.yellow),
+            _ => None,
+        };
+
+        card(&theme).bg(theme.secondary.opacity(0.45)).child(
+            div()
+                .grid()
+                .grid_cols(3)
+                .gap_x_6()
+                .gap_y_3()
+                .child(field_cell(
+                    "Status",
+                    h_flex()
+                        .gap_1()
+                        .pl_2()
+                        .rounded(theme.radius)
+                        .bg(status.opacity(0.14))
+                        .text_color(status)
+                        .child(dot(status))
+                        .child(value(
+                            "status",
+                            status_label(&task.status).to_owned(),
+                            statuses,
+                            Some(task.status.clone()),
+                            Box::new(set("status")),
+                        )),
+                    cx,
+                ))
+                .child(field_cell(
+                    "Priority",
+                    h_flex()
+                        .gap_1()
+                        .child(dot(priority_color(&task.priority, &theme)))
+                        .child(value(
+                            "priority",
+                            priority_label(&task.priority).to_owned(),
+                            priorities,
+                            Some(task.priority.clone()),
+                            Box::new(set("priority")),
+                        )),
+                    cx,
+                ))
+                .child(field_cell(
+                    "Due",
+                    h_flex()
+                        .gap_1()
+                        .when_some(due_color, |this, c| this.text_color(c))
+                        .child(
+                            Icon::new(crate::assets::Lucide::CalendarDays)
+                                .small()
+                                .text_color(due_color.unwrap_or(theme.muted_foreground)),
+                        )
+                        .child(value(
+                            "due",
+                            task.due_on
+                                .as_deref()
+                                .map(human_day)
+                                .unwrap_or_else(|| "No due date".into()),
+                            std::iter::once((String::new(), "No due date".to_owned()))
+                                .chain(quick_dates().into_iter().map(|(l, d)| (d, l.to_owned())))
+                                .collect(),
+                            task.due_on.clone(),
+                            Box::new(set("due_on")),
+                        )),
+                    cx,
+                ))
+                .child(field_cell(
+                    "Owner",
+                    h_flex().gap_1().child(person(&task.owner)).child(value(
+                        "owner",
+                        person_label(&task.owner),
+                        people.clone(),
+                        task.owner.as_ref().map(|p| p.id.clone()),
+                        Box::new(set("owner_user_id")),
+                    )),
+                    cx,
+                ))
+                .child(field_cell(
+                    "Who acts next",
+                    h_flex()
+                        .gap_1()
+                        .child(person(&task.action_required))
+                        .child(value(
+                            "action",
+                            person_label(&task.action_required),
+                            people,
+                            task.action_required.as_ref().map(|p| p.id.clone()),
+                            Box::new(set("action_required_user_id")),
+                        )),
+                    cx,
+                ))
+                .child(field_cell(
+                    "Project",
+                    value(
+                        "project",
+                        task.project_name
+                            .clone()
+                            .unwrap_or_else(|| "No project".into()),
+                        projects,
+                        task.project_id.clone(),
+                        Box::new(set("project_id")),
+                    ),
+                    cx,
+                ))
+                .child(field_cell(
+                    "My planner",
+                    picker(
+                        "planner",
+                        task.planner_bucket
+                            .as_deref()
+                            .and_then(|b| BUCKETS.iter().find(|(k, _)| *k == b).map(|(_, l)| *l))
+                            .unwrap_or("Not planned"),
+                        buckets,
+                        task.planner_bucket.clone(),
+                        plan,
+                    ),
+                    cx,
+                )),
+        )
     }
 
     fn render_description(
@@ -850,11 +906,17 @@ impl TaskView {
         let theme = cx.theme().clone();
         let editable = task.can_edit();
         let body = task.description.clone().unwrap_or_default();
-        v_flex()
-            .gap_2()
-            .child(section_title("Description", &theme).when(
-                editable && self.description.is_none(),
-                |this| {
+        card(&theme)
+            .p_5()
+            .border_color(theme.blue.opacity(0.35))
+            .child(
+                section_title(
+                    "Description",
+                    crate::assets::Lucide::TextAlignStart,
+                    theme.blue,
+                    &theme,
+                )
+                .when(editable && self.description.is_none(), |this| {
                     this.child(
                         Button::new("edit-desc")
                             .label("Edit")
@@ -864,8 +926,8 @@ impl TaskView {
                                 this.start_editing_description(window, cx)
                             })),
                     )
-                },
-            ))
+                }),
+            )
             .child(match &self.description {
                 Some(editor) => v_flex()
                     .gap_2()
@@ -901,7 +963,10 @@ impl TaskView {
                     .child("No description.")
                     .into_any_element(),
                 None => div()
-                    .text_sm()
+                    .max_w(px(720.))
+                    .text_size(px(15.))
+                    .line_height(px(24.))
+                    .text_color(theme.foreground)
                     .child(rich_text("task-description", &body))
                     .into_any_element(),
             })
@@ -914,11 +979,16 @@ impl TaskView {
     ) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
         let editable = task.can_edit();
-        v_flex()
-            .gap_2()
-            .when(!self.checklists.is_empty() || editable, |this| {
-                this.child(section_title("Checklists", &theme))
-            })
+        if self.checklists.is_empty() && !editable {
+            return div().into_any_element();
+        }
+        card(&theme)
+            .child(section_title(
+                "Checklists",
+                crate::assets::Lucide::ListChecks,
+                theme.green,
+                &theme,
+            ))
             .children(self.checklists.iter().map(|list| {
                 let done = list.items.iter().filter(|i| i.done).count();
                 v_flex()
@@ -932,7 +1002,11 @@ impl TaskView {
                             .child(
                                 div()
                                     .text_xs()
-                                    .text_color(theme.muted_foreground)
+                                    .text_color(if done == list.items.len() && done > 0 {
+                                        theme.green
+                                    } else {
+                                        theme.muted_foreground
+                                    })
                                     .child(format!("{done}/{}", list.items.len())),
                             ),
                     )
@@ -992,13 +1066,18 @@ impl TaskView {
                         .child(Input::new(&self.new_checklist).small()),
                 )
             })
+            .into_any_element()
     }
 
     fn render_reminders(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
-        v_flex()
-            .gap_2()
-            .child(section_title("Reminders", &theme))
+        card(&theme)
+            .child(section_title(
+                "Reminders",
+                crate::assets::Lucide::Bell,
+                theme.yellow,
+                &theme,
+            ))
             .children(self.reminders.iter().map(|r| {
                 let id = r.id.clone();
                 h_flex()
@@ -1045,82 +1124,212 @@ impl TaskView {
             )
     }
 
+    /// The conversation as a pane of its own: a header, the thread scrolling
+    /// on its own, and the composer pinned at the bottom.
     fn render_comments(&self, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let theme = cx.theme().clone();
-        let Some(thread) = &self.thread else {
-            return div().into_any_element();
-        };
+        let messages: Vec<Message> = self
+            .thread
+            .iter()
+            .flat_map(|t| t.messages.iter().filter(|m| !m.deleted).cloned())
+            .collect();
+        let can_post = self.thread.as_ref().is_some_and(|t| t.can_post);
+
         v_flex()
-            .gap_3()
-            .child(section_title("Comments", &theme))
-            .when(thread.messages.is_empty(), |this| {
-                this.child(
-                    div()
-                        .text_sm()
-                        .text_color(theme.muted_foreground)
-                        .child("No comments yet."),
-                )
-            })
-            .children(thread.messages.iter().filter(|m| !m.deleted).map(|m| {
-                v_flex()
-                    .gap_1()
+            .size_full()
+            .bg(theme.sidebar)
+            .child(
+                h_flex()
+                    .flex_none()
+                    .gap_2()
+                    .px_4()
+                    .h(px(44.))
+                    .border_b_1()
+                    .border_color(theme.border)
                     .child(
-                        h_flex()
-                            .gap_2()
-                            .text_xs()
-                            .child(
-                                div().font_weight(FontWeight::SEMIBOLD).child(
-                                    m.author
-                                        .as_ref()
-                                        .map(Person::name)
-                                        .unwrap_or_else(|| "ayeaye".into()),
-                                ),
-                            )
-                            .when_some(m.created_at, |this, at| {
+                        Icon::new(crate::assets::Lucide::MessageSquare)
+                            .small()
+                            .text_color(theme.blue),
+                    )
+                    .child(
+                        div()
+                            .text_sm()
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .child("Comments"),
+                    )
+                    .when(!messages.is_empty(), |this| {
+                        this.child(
+                            div()
+                                .px_1p5()
+                                .rounded_full()
+                                .bg(theme.blue.opacity(0.15))
+                                .text_xs()
+                                .text_color(theme.blue)
+                                .child(messages.len().to_string()),
+                        )
+                    }),
+            )
+            .child(
+                div()
+                    .id("task-comments")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.comments_scroll)
+                    .child(
+                        v_flex()
+                            .gap_4()
+                            .p_4()
+                            .when(self.thread.is_none(), |this| {
                                 this.child(
-                                    div().text_color(theme.muted_foreground).child(ago_long(at)),
+                                    div()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child("Comments couldn't be loaded."),
                                 )
                             })
-                            .when(m.edited_at.is_some(), |this| {
-                                this.child(div().text_color(theme.muted_foreground).child("edited"))
-                            }),
-                    )
-                    .child(div().text_sm().child(rich_text(
-                        SharedString::from(format!("msg-{}", m.id)),
-                        &m.body,
-                    )))
-            }))
-            .when(thread.can_post, |this| {
-                this.child(
-                    v_flex().gap_2().child(Textarea::new(&self.comment)).child(
-                        h_flex().justify_end().child(
-                            Button::new("send-comment")
-                                .label("Comment")
-                                .primary()
-                                .small()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    let body = this.comment.read(cx).value().trim().to_owned();
-                                    if !body.is_empty() {
-                                        this.comment
-                                            .update(cx, |c, cx| c.set_value("", window, cx));
-                                        this.send_comment(body, window, cx);
-                                    }
-                                })),
-                        ),
+                            .when(self.thread.is_some() && messages.is_empty(), |this| {
+                                this.child(
+                                    v_flex()
+                                        .items_center()
+                                        .gap_2()
+                                        .py_8()
+                                        .text_sm()
+                                        .text_color(theme.muted_foreground)
+                                        .child(
+                                            Icon::new(crate::assets::Lucide::MessageSquare)
+                                                .large()
+                                                .text_color(theme.muted_foreground.opacity(0.5)),
+                                        )
+                                        .child("No comments yet — start the conversation."),
+                                )
+                            })
+                            .children(messages.iter().map(|m| render_message(m, &theme))),
                     ),
+            )
+            .when(can_post, |this| {
+                this.child(
+                    v_flex()
+                        .flex_none()
+                        .gap_2()
+                        .p_3()
+                        .border_t_1()
+                        .border_color(theme.border)
+                        .bg(theme.background)
+                        .child(Textarea::new(&self.comment))
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(theme.muted_foreground)
+                                        .child("⌘⏎ to send"),
+                                )
+                                .child(
+                                    Button::new("send-comment")
+                                        .icon(IconName::ArrowUp)
+                                        .label("Comment")
+                                        .primary()
+                                        .small()
+                                        .on_click(cx.listener(|this, _, window, cx| {
+                                            let body =
+                                                this.comment.read(cx).value().trim().to_owned();
+                                            if !body.is_empty() {
+                                                this.comment.update(cx, |c, cx| {
+                                                    c.set_value("", window, cx)
+                                                });
+                                                this.send_comment(body, window, cx);
+                                            }
+                                        })),
+                                ),
+                        ),
                 )
             })
-            .into_any_element()
     }
 }
 
-fn section_title(label: &'static str, theme: &gpui_kit::component::Theme) -> Div {
+/// One comment: who and when over the body, in a bubble. Your own lean
+/// blue so you can find your place in a long thread.
+fn render_message(m: &Message, theme: &gpui_kit::component::Theme) -> AnyElement {
+    let name = m
+        .author
+        .as_ref()
+        .map(Person::name)
+        .unwrap_or_else(|| "ayeaye".into());
+    let (bubble, edge) = if m.mine {
+        (theme.blue.opacity(0.10), theme.blue.opacity(0.35))
+    } else {
+        (theme.background, theme.border)
+    };
+    h_flex()
+        .items_start()
+        .gap_2p5()
+        .child(avatar(&name, px(28.), theme))
+        .child(
+            v_flex()
+                .flex_1()
+                .min_w_0()
+                .gap_1()
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .text_xs()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .child(name),
+                        )
+                        .when_some(m.created_at, |this, at| {
+                            this.child(div().text_color(theme.muted_foreground).child(ago_long(at)))
+                        })
+                        .when(m.edited_at.is_some(), |this| {
+                            this.child(div().text_color(theme.muted_foreground).child("· edited"))
+                        }),
+                )
+                .child(
+                    div()
+                        .px_3()
+                        .py_2()
+                        .rounded(theme.radius_lg)
+                        .border_1()
+                        .border_color(edge)
+                        .bg(bubble)
+                        .text_size(px(14.))
+                        .line_height(px(21.))
+                        .child(rich_text(
+                            SharedString::from(format!("msg-{}", m.id)),
+                            &m.body,
+                        )),
+                ),
+        )
+        .into_any_element()
+}
+
+/// A section of the task's page: a bordered panel.
+fn card(theme: &gpui_kit::component::Theme) -> Div {
+    v_flex()
+        .gap_3()
+        .p_4()
+        .rounded(theme.radius_lg)
+        .border_1()
+        .border_color(theme.border)
+        .bg(theme.background)
+}
+
+fn section_title(
+    label: &'static str,
+    icon: crate::assets::Lucide,
+    color: Hsla,
+    theme: &gpui_kit::component::Theme,
+) -> Div {
     h_flex()
         .gap_2()
-        .pt_2()
         .text_xs()
         .font_weight(FontWeight::SEMIBOLD)
         .text_color(theme.muted_foreground)
+        .child(Icon::new(icon).small().text_color(color))
         .child(label.to_uppercase())
 }
 
@@ -1166,13 +1375,16 @@ impl Item for TaskView {
 }
 
 impl Render for TaskView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme().clone();
+        // Side by side when there's room; on a narrow window the comments
+        // follow the task in one scroll.
+        let split = window.viewport_size().width >= px(980.);
         let content = match (&self.task, &self.load_error) {
             (Some(task), _) => {
                 let task = task.clone();
                 v_flex()
-                    .gap_5()
+                    .gap_4()
                     .child(self.render_header(&task, cx))
                     .when_some(self.error.clone(), |this, e| {
                         this.child(
@@ -1189,7 +1401,17 @@ impl Render for TaskView {
                     .child(self.render_description(&task, cx))
                     .child(self.render_checklists(&task, cx))
                     .child(self.render_reminders(cx))
-                    .child(self.render_comments(cx))
+                    .when(!split, |this| {
+                        this.child(
+                            div()
+                                .h(px(560.))
+                                .rounded(theme.radius_lg)
+                                .border_1()
+                                .border_color(theme.border)
+                                .overflow_hidden()
+                                .child(self.render_comments(cx)),
+                        )
+                    })
                     .into_any_element()
             }
             (None, Some(e)) => v_flex()
@@ -1208,14 +1430,34 @@ impl Render for TaskView {
                 .child("Loading…")
                 .into_any_element(),
         };
+        let loaded = self.task.is_some();
 
-        div()
+        h_flex()
             .id("task-view")
             .track_focus(&self.focus_handle)
             .size_full()
+            .items_start()
             .bg(theme.background)
-            .overflow_y_scroll()
-            .track_scroll(&self.scroll)
-            .child(div().max_w(px(860.)).px_6().py_5().child(content))
+            .child(
+                div()
+                    .id("task-main")
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.scroll)
+                    .child(div().max_w(px(860.)).px_6().py_5().child(content)),
+            )
+            .when(split && loaded, |this| {
+                this.child(
+                    div()
+                        .flex_none()
+                        .w(px(400.))
+                        .h_full()
+                        .border_l_1()
+                        .border_color(theme.border)
+                        .child(self.render_comments(cx)),
+                )
+            })
     }
 }

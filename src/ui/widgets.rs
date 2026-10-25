@@ -4,7 +4,7 @@ use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::text::TextView;
-use gpui_kit::component::{ActiveTheme as _, Sizable as _, Theme, h_flex};
+use gpui_kit::component::{ActiveTheme as _, Sizable as _, Theme, h_flex, v_flex};
 use gpui_kit::*;
 
 use crate::api::models::priority_rank;
@@ -91,20 +91,64 @@ pub fn picker(
         })
 }
 
-/// A label and a value on one line, for a task's fields.
-pub fn field_row(label: &'static str, value: impl IntoElement, cx: &App) -> Div {
-    h_flex()
-        .gap_2()
-        .min_h(px(28.))
+/// A small label over its value, for one cell of a task's field grid.
+pub fn field_cell(label: &'static str, value: impl IntoElement, cx: &App) -> Div {
+    v_flex()
+        .gap_0p5()
+        .min_w_0()
         .child(
             div()
-                .w(px(110.))
-                .flex_none()
-                .text_sm()
+                .text_xs()
+                .font_weight(FontWeight::MEDIUM)
                 .text_color(cx.theme().muted_foreground)
                 .child(label),
         )
-        .child(value)
+        .child(h_flex().gap_1p5().min_h(px(24.)).child(value))
+}
+
+/// The workflow status's colour, for its pill.
+pub fn status_color(status: &str, theme: &Theme) -> Hsla {
+    match status {
+        "in_progress" => theme.blue,
+        "review" => theme.magenta,
+        "on_hold" => theme.yellow,
+        "blocker" => theme.red,
+        _ => theme.muted_foreground,
+    }
+}
+
+/// A person's initials on a colour of their own, the same every time.
+pub fn avatar(name: &str, size: Pixels, theme: &Theme) -> Div {
+    let palette = [
+        theme.blue,
+        theme.green,
+        theme.magenta,
+        theme.cyan,
+        theme.yellow,
+        theme.red,
+    ];
+    let hash = name
+        .bytes()
+        .fold(0usize, |h, b| h.wrapping_mul(31).wrapping_add(b as usize));
+    let color = palette[hash % palette.len()];
+    let initials: String = name
+        .split(|c: char| c.is_whitespace() || c == '.' || c == '@')
+        .filter_map(|w| w.chars().next())
+        .take(2)
+        .flat_map(char::to_uppercase)
+        .collect();
+    div()
+        .flex_none()
+        .size(size)
+        .rounded_full()
+        .flex()
+        .items_center()
+        .justify_center()
+        .bg(color.opacity(0.18))
+        .text_color(color)
+        .text_size(size * 0.42)
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(initials)
 }
 
 // ------------------------------------------------------------------- dates
