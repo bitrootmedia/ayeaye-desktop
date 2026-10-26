@@ -123,6 +123,14 @@ impl ApiClient {
         decode(self.send("GET", path, None)?)
     }
 
+    /// A page of a list, with the `X-Total-Count` the server sends when asked
+    /// for a `limit` — what the page is a page *of*.
+    pub fn get_counted<T: DeserializeOwned>(&self, path: &str) -> ApiResult<(T, Option<usize>)> {
+        let response = self.exchange("GET", path, None)?;
+        let total = response.total_count;
+        Ok((decode(check_status(response)?)?, total))
+    }
+
     pub fn post<T: DeserializeOwned>(&self, path: &str, body: &impl Serialize) -> ApiResult<T> {
         decode(self.send("POST", path, Some(to_value(body)?))?)
     }
@@ -256,6 +264,12 @@ impl ApiClient {
     // ------------------------------------------------------------- plumbing
 
     fn send(&self, method: &str, path: &str, body: Option<Value>) -> ApiResult<Value> {
+        check_status(self.exchange(method, path, body)?)
+    }
+
+    /// One request with the session kept alive around it: refreshed first if
+    /// stale, retried once after a 401.
+    fn exchange(&self, method: &str, path: &str, body: Option<Value>) -> ApiResult<RawResponse> {
         let tokens = self.tokens();
         // Pre-emptive refresh: cheaper than a round trip we know will 401.
         if tokens.has_session() && tokens.is_stale() && tokens.has_refresh() {
@@ -270,7 +284,7 @@ impl ApiClient {
             self.refresh_session()?;
             response = self.raw(method, path, body.as_ref(), None, &[])?;
         }
-        check_status(response)
+        Ok(response)
     }
 
     /// One HTTP exchange. Reads the `St-*` headers off **every** response,
@@ -328,13 +342,22 @@ impl ApiClient {
         }
 
         let status = response.status().as_u16();
+        let total_count = response
+            .headers()
+            .get("x-total-count")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.trim().parse().ok());
         let text = response.body_mut().read_to_string().unwrap_or_default();
         let body = if text.trim().is_empty() {
             Value::Null
         } else {
             serde_json::from_str(&text).unwrap_or(Value::String(text))
         };
-        Ok(RawResponse { status, body })
+        Ok(RawResponse {
+            status,
+            body,
+            total_count,
+        })
     }
 
     fn network_error(&self, error: ureq::Error) -> ApiError {
@@ -356,10 +379,11 @@ impl ApiClient {
 struct RawResponse {
     status: u16,
     body: Value,
+    total_count: Option<usize>,
 }
 
 fn check_status(response: RawResponse) -> ApiResult<Value> {
-    let RawResponse { status, body } = response;
+    let RawResponse { status, body, .. } = response;
     match status {
         200..=299 => Ok(body),
         403 if has_claim_error(&body, "st-mfa-ok") => Err(ApiError::MfaRequired),
@@ -456,16 +480,19 @@ mod tests {
         let gate = RawResponse {
             status: 403,
             body: json!({"claimValidationErrors": [{"id": "st-ev"}]}),
+            total_count: None,
         };
         assert_eq!(check_status(gate), Err(ApiError::EmailVerificationRequired));
         let plain = RawResponse {
             status: 403,
             body: json!({"detail": "no"}),
+            total_count: None,
         };
         assert_eq!(check_status(plain), Err(ApiError::Forbidden("no".into())));
         let missing = RawResponse {
             status: 404,
             body: json!({"detail": "note not found"}),
+            total_count: None,
         };
         assert_eq!(
             check_status(missing),

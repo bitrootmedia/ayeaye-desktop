@@ -15,7 +15,9 @@ use gpui_kit::*;
 use crate::api::models::Task as TaskData;
 use crate::api::models::priority_rank;
 use crate::api::{ApiError, TaskQuery};
+use crate::assets::Lucide;
 use crate::session::OrgCtx;
+use crate::tasks::table::{NOBODY, TableFilters};
 use crate::ui::open::Open;
 use crate::ui::widgets::{dot, human_day, picker, priority_color};
 
@@ -149,6 +151,23 @@ impl TasksPanel {
         if let Some(row) = self.tasks.iter_mut().find(|t| t.id == task.id) {
             *row = task.clone();
             self.update_matches(cx);
+        }
+    }
+
+    /// This view in the task table, where there's room for every field.
+    fn table_filters(&self) -> TableFilters {
+        let me = self.ctx.me().map(str::to_owned);
+        let (owner, needs) = match self.view {
+            TaskView::Mine => (me, None),
+            TaskView::WaitingOnMe => (None, me),
+            TaskView::Triage => (None, Some(NOBODY.to_owned())),
+            TaskView::All => (None, None),
+        };
+        TableFilters {
+            owner,
+            needs,
+            project: self.project.clone(),
+            ..Default::default()
         }
     }
 
@@ -338,6 +357,18 @@ impl Render for TasksPanel {
                     .when(self.loading, |this| {
                         this.child(Spinner::new().xsmall().color(theme.muted_foreground))
                     })
+                    .child(
+                        Button::new("tasks-table")
+                            .icon(Lucide::Table)
+                            .ghost()
+                            .xsmall()
+                            .tooltip("Open as a table, with every field (⌘⌥T)")
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                cx.emit(Open::TaskTable {
+                                    filters: Some(this.table_filters()),
+                                })
+                            })),
+                    )
                     .child(
                         Button::new("tasks-new")
                             .icon(IconName::Plus)

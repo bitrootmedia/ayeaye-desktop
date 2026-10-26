@@ -19,6 +19,20 @@ pub fn ago_short(at: DateTime<Utc>) -> String {
     }
 }
 
+/// "14:05" today, "3 Nov 14:05" this year, "3 Nov 2025 14:05" before —
+/// for a column of timestamps.
+pub fn stamp(at: DateTime<Utc>) -> String {
+    let local = at.with_timezone(&Local);
+    let now = Local::now();
+    if local.date_naive() == now.date_naive() {
+        local.format("%H:%M").to_string()
+    } else if local.format("%Y").to_string() == now.format("%Y").to_string() {
+        local.format("%-d %b %H:%M").to_string()
+    } else {
+        local.format("%-d %b %Y %H:%M").to_string()
+    }
+}
+
 /// "just now", "5 min ago", "3 h ago", or a date — for sentences.
 pub fn ago_long(at: DateTime<Utc>) -> String {
     let secs = (Utc::now() - at).num_seconds().max(0);

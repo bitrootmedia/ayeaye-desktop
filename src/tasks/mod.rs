@@ -2,4 +2,5 @@
 
 pub mod panel;
 pub mod planner;
+pub mod table;
 pub mod view;

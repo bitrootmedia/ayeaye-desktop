@@ -48,6 +48,7 @@ use crate::store::workspace::OpenTabs;
 use crate::store::{orgs_cache_path, read_json, write_json};
 use crate::tasks::panel::{TasksPanel, TasksPanelEvent};
 use crate::tasks::planner::{PlannerEvent, PlannerPanel};
+use crate::tasks::table::{TableFilters, TaskTable, TaskTableEvent};
 use crate::tasks::view::{TaskView, TaskViewEvent};
 use crate::timer::TimerState;
 use crate::ui::widgets::clock;
@@ -535,6 +536,10 @@ impl Workspace {
             cx.open_url(url);
             return;
         }
+        if let Open::TaskTable { filters } = open {
+            self.open_task_table(filters, window, cx);
+            return;
+        }
         let (preview, focus) = match &open {
             Open::Note { preview, focus, .. } => (*preview, *focus),
             Open::Task { preview, .. } | Open::Article { preview, .. } => (*preview, !*preview),
@@ -556,7 +561,7 @@ impl Workspace {
             Open::Task { id, .. } => self.task_item(id, window, cx),
             Open::Article { id, .. } => self.article_item(id, window, cx),
             Open::Spark { id } => self.spark_item(&id, window, cx),
-            Open::Web(_) => None,
+            Open::TaskTable { .. } | Open::Web(_) => None,
         };
         if let Some(item) = item {
             self.pane.update(cx, |pane, cx| {
@@ -596,11 +601,83 @@ impl Workspace {
                         m.tasks.update(cx, |t, cx| t.task_changed(task, cx));
                         m.planner.update(cx, |p, cx| p.refresh(cx));
                     }
+                    for table in this.task_tables(cx) {
+                        table.update(cx, |t, cx| t.task_changed(task, cx));
+                    }
                 }
                 TaskViewEvent::AuthFailed(e) => cx.emit(WorkspaceEvent::AuthRequired(e.clone())),
             },
         ));
         Some(Box::new(view))
+    }
+
+    /// The one task table: shown with `filters` if given, else as it was.
+    fn open_task_table(
+        &mut self,
+        filters: Option<TableFilters>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(table) = self.task_tables(cx).into_iter().next() {
+            if let Some(filters) = filters {
+                table.update(cx, |t, cx| t.show(filters, cx));
+            }
+            let ix = self.pane.read(cx).find("tasks:table", cx);
+            if let Some(ix) = ix {
+                self.pane
+                    .update(cx, |pane, cx| pane.activate(ix, true, window, cx));
+            }
+            return;
+        }
+        let Some(ctx) = self.org_ctx() else { return };
+        let saved = AppState::get(cx)
+            .workspace
+            .task_table(&self.profile.id, ctx.org_id());
+        let filters = match filters {
+            Some(f) => TableFilters {
+                sort: saved.sort,
+                descending: saved.descending,
+                closed: saved.closed,
+                ..f
+            },
+            None => saved,
+        };
+        let view = cx.new(|cx| TaskTable::new(ctx, filters, window, cx));
+        self._subscriptions.push(cx.subscribe_in(
+            &view,
+            window,
+            |this, _, open: &Open, window, cx| this.open(open.clone(), window, cx),
+        ));
+        self._subscriptions.push(cx.subscribe_in(
+            &view,
+            window,
+            |this, _, e: &TaskTableEvent, _, cx| match e {
+                TaskTableEvent::FiltersChanged(filters) => {
+                    let Some(org) = &this.org else { return };
+                    let (profile_id, org_id) = (this.profile.id.clone(), org.id.clone());
+                    let filters = filters.clone();
+                    AppState::update(cx, |state, _| {
+                        state
+                            .workspace
+                            .set_task_table(&profile_id, &org_id, filters);
+                        state.workspace.save();
+                    });
+                }
+                TaskTableEvent::AuthFailed(e) => cx.emit(WorkspaceEvent::AuthRequired(e.clone())),
+            },
+        ));
+        let item: Box<dyn ItemHandle> = Box::new(view);
+        self.pane
+            .update(cx, |pane, cx| pane.add_item(item, false, true, window, cx));
+    }
+
+    /// The open task table, if any (a `Vec` so callers needn't care).
+    fn task_tables(&self, cx: &App) -> Vec<Entity<TaskTable>> {
+        self.pane
+            .read(cx)
+            .items()
+            .filter_map(|item| item.to_any_view().downcast::<TaskTable>().ok())
+            .collect()
     }
 
     fn article_item(
@@ -975,6 +1052,9 @@ impl Workspace {
                 _ => {}
             }
         }
+        for table in self.task_tables(cx) {
+            table.update(cx, |t, cx| t.refresh(cx));
+        }
         self.personal.inbox.update(cx, |i, cx| i.refresh(cx));
         self.personal.timer.update(cx, |t, cx| t.refresh(cx));
         self.last_personal_refresh = Instant::now();
@@ -1018,6 +1098,11 @@ impl Workspace {
                 Module::Tasks => m.tasks.update(cx, |t, cx| t.refresh(cx)),
                 Module::Planner => m.planner.update(cx, |p, cx| p.refresh(cx)),
                 _ => {}
+            }
+        }
+        if here {
+            for table in self.task_tables(cx) {
+                table.update(cx, |t, cx| t.refresh(cx));
             }
         }
         // A check-in on the running task can't wait for the throttle.
@@ -1261,6 +1346,15 @@ impl Workspace {
 
     fn action_new_task(&mut self, _: &NewTask, window: &mut Window, cx: &mut Context<Self>) {
         self.show_prompt(PromptKind::NewTask, window, cx);
+    }
+
+    fn action_open_task_table(
+        &mut self,
+        _: &OpenTaskTable,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open(Open::TaskTable { filters: None }, window, cx);
     }
 
     fn action_capture_spark(
@@ -1838,6 +1932,7 @@ impl Render for Workspace {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(Self::action_new_note))
             .on_action(cx.listener(Self::action_new_task))
+            .on_action(cx.listener(Self::action_open_task_table))
             .on_action(cx.listener(Self::action_capture_spark))
             .on_action(cx.listener(Self::action_search))
             .on_action(cx.listener(Self::action_show_module))

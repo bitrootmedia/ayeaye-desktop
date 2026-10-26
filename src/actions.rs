@@ -26,6 +26,8 @@ gpui_kit::actions!(
         SelectNext,
         SelectPrev,
         Cancel,
+        OpenTaskTable,
+        OpenSelected,
     ]
 );
 
@@ -60,6 +62,7 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-s", SaveNow, ws),
         KeyBinding::new("secondary-shift-backspace", DeleteNote, ws),
         KeyBinding::new("secondary-r", Refresh, ws),
+        KeyBinding::new("secondary-alt-t", OpenTaskTable, ws),
         KeyBinding::new("secondary-q", Quit, None),
         // Lists with a filter field: the arrows move the selection, not the
         // caret. "X > Input" outranks the Input's own up/down.
@@ -71,6 +74,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-p", SelectPrev, Some("QuickOpen > Input")),
         KeyBinding::new("ctrl-n", SelectNext, Some("QuickOpen > Input")),
         KeyBinding::new("escape", Cancel, Some("QuickOpen")),
+        // The task table: Return opens the selected row, ↓ from its text
+        // filter moves into the rows.
+        KeyBinding::new("enter", OpenSelected, Some("TaskTable > DataTable")),
+        KeyBinding::new("down", SelectNext, Some("TaskTable > Input")),
     ];
     for n in 1..=9 {
         bindings.push(KeyBinding::new(
@@ -119,6 +126,8 @@ pub fn set_menus(cx: &mut App) {
             MenuItem::action("Sparks", ShowModule(4)),
             MenuItem::action("Reminders", ShowModule(5)),
             MenuItem::action("Inbox", ShowModule(6)),
+            MenuItem::separator(),
+            MenuItem::action("All Tasks as a Table", OpenTaskTable),
             MenuItem::separator(),
             MenuItem::action("Toggle Sidebar", ToggleSidebar),
             MenuItem::action("Focus Notes List", FocusNotes),

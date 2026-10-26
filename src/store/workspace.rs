@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use super::{data_dir, read_json, write_json};
+use crate::tasks::table::TableFilters;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct OpenTabs {
@@ -26,6 +27,9 @@ pub struct WorkspaceState {
     /// The module last shown on the rail.
     #[serde(default)]
     pub module: Option<String>,
+    /// What the task table showed, keyed like `tabs`.
+    #[serde(default)]
+    task_tables: HashMap<String, TableFilters>,
 }
 
 fn default_true() -> bool {
@@ -61,8 +65,21 @@ impl WorkspaceState {
         self.tabs.insert(format!("{profile_id}/{org_id}"), tabs);
     }
 
+    pub fn task_table(&self, profile_id: &str, org_id: &str) -> TableFilters {
+        self.task_tables
+            .get(&format!("{profile_id}/{org_id}"))
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    pub fn set_task_table(&mut self, profile_id: &str, org_id: &str, filters: TableFilters) {
+        self.task_tables
+            .insert(format!("{profile_id}/{org_id}"), filters);
+    }
+
     pub fn forget_profile(&mut self, profile_id: &str) {
         let prefix = format!("{profile_id}/");
         self.tabs.retain(|k, _| !k.starts_with(&prefix));
+        self.task_tables.retain(|k, _| !k.starts_with(&prefix));
     }
 }

@@ -11,13 +11,19 @@ use super::{ApiClient, ApiResult};
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct TaskQuery {
     pub project_id: Option<String>,
+    /// Only tasks in no project.
+    pub loose: bool,
+    pub tag_id: Option<String>,
     pub owner_user_id: Option<String>,
     pub action_required_user_id: Option<String>,
     /// Triage: open tasks nobody is being asked to act on.
     pub action_required_unset: bool,
     pub include_closed: bool,
     pub status: Option<String>,
+    pub priority: Option<String>,
+    /// One of the server's sort keys; unknown ones are ignored there.
     pub sort: Option<String>,
+    pub descending: bool,
     pub limit: usize,
 }
 
@@ -65,18 +71,39 @@ impl ApiClient {
 
     /// There is no default limit on this endpoint, so one is always sent.
     pub fn tasks(&self, org_id: &str, q: &TaskQuery) -> ApiResult<Vec<Task>> {
+        self.tasks_counted(org_id, q).map(|(tasks, _)| tasks)
+    }
+
+    /// The tasks and how many match in all, which may be more than `limit`.
+    pub fn tasks_counted(&self, org_id: &str, q: &TaskQuery) -> ApiResult<(Vec<Task>, usize)> {
         let flag = |b: bool| b.then(|| "true".to_owned());
         let qs = query(&[
             ("project_id", q.project_id.clone()),
+            ("loose", flag(q.loose)),
+            ("tag_id", q.tag_id.clone()),
             ("owner_user_id", q.owner_user_id.clone()),
             ("action_required_user_id", q.action_required_user_id.clone()),
             ("action_required_unset", flag(q.action_required_unset)),
             ("include_closed", flag(q.include_closed)),
             ("status", q.status.clone()),
+            ("priority", q.priority.clone()),
             ("sort", q.sort.clone()),
+            (
+                "dir",
+                q.sort
+                    .as_ref()
+                    .map(|_| if q.descending { "desc" } else { "asc" }.to_owned()),
+            ),
             ("limit", Some(q.limit.max(1).to_string())),
         ]);
-        self.get(&format!("{}/tasks{qs}", org(org_id)))
+        let (tasks, total): (Vec<Task>, _) =
+            self.get_counted(&format!("{}/tasks{qs}", org(org_id)))?;
+        let total = total.unwrap_or(tasks.len());
+        Ok((tasks, total))
+    }
+
+    pub fn tags(&self, org_id: &str) -> ApiResult<Vec<Tag>> {
+        self.get(&format!("{}/tags", org(org_id)))
     }
 
     pub fn task(&self, org_id: &str, task_id: &str) -> ApiResult<Task> {

@@ -3,6 +3,8 @@
 
 use gpui_kit::SharedString;
 
+use crate::tasks::table::TableFilters;
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Open {
     Note {
@@ -24,6 +26,11 @@ pub enum Open {
     Spark {
         id: String,
     },
+    /// The task table, one per organisation. With filters, it shows those
+    /// (the sidebar's "Open as table"); without, whatever it showed last.
+    TaskTable {
+        filters: Option<TableFilters>,
+    },
     /// Something only the web app does.
     Web(String),
 }
@@ -36,6 +43,7 @@ pub fn key_for(open: &Open) -> Option<SharedString> {
             Open::Task { id, .. } => format!("task:{id}"),
             Open::Article { id, .. } => format!("article:{id}"),
             Open::Spark { id } => format!("spark:{id}"),
+            Open::TaskTable { .. } => "tasks:table".to_owned(),
             Open::Web(_) => return None,
         }
         .into(),
@@ -59,6 +67,7 @@ pub fn open_for_key(key: &str) -> Option<Open> {
         },
         "article" => Open::Article { id, preview: false },
         "spark" => Open::Spark { id },
+        "tasks" if id == "table" => Open::TaskTable { filters: None },
         _ => return None,
     })
 }
@@ -69,7 +78,7 @@ mod tests {
 
     #[::core::prelude::v1::test]
     fn keys_round_trip() {
-        for key in ["note:1", "task:2", "article:3", "spark:4"] {
+        for key in ["note:1", "task:2", "article:3", "spark:4", "tasks:table"] {
             let open = open_for_key(key).unwrap();
             assert_eq!(key_for(&open).unwrap().as_ref(), key);
         }

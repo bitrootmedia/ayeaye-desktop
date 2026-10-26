@@ -95,6 +95,8 @@ pub struct Project {
 pub struct Tag {
     pub id: String,
     pub name: String,
+    /// Its tasks leave the lists unless the tag is asked for by name.
+    pub off_board: bool,
 }
 
 // ------------------------------------------------------------------- tasks
@@ -154,7 +156,10 @@ pub struct Task {
     pub action_required: Option<Person>,
     pub due_on: Option<String>,
     pub estimated_hours: Option<f64>,
+    pub created_at: Option<DateTime<Utc>>,
     pub updated_at: Option<DateTime<Utc>>,
+    /// Only its owner can see it.
+    pub is_hidden: bool,
     pub is_pinned: bool,
     pub planner_bucket: Option<String>,
     pub tags: Vec<Tag>,

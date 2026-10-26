@@ -9,7 +9,10 @@ The rail at the left holds the modules. The organisation's:
 - **Notes** — the notepad that replaces a folder of loose text files
 - **Tasks** — Waiting on me, Mine, Triage, All open, by project; a task opens
   in a tab with its fields, description, checklists, reminders, comments and
-  the timer
+  the timer. ⌘⌥T (or the table button on the list) opens every task as the
+  web app's table: project, status, priority, owner, action required, due,
+  created and updated columns, sorted by the server on any of them, filtered
+  on all of them plus tag and closed, paged with the total always shown
 - **My planner** — Today, Tomorrow, This week, Next week, Someday
 - **Knowledge base** — books and articles; read rendered, edit as markdown,
   publish
@@ -66,6 +69,7 @@ Type `http://localhost` as the server. `http://` is warned about, never blocked.
 |---|---|
 | ⌘N | New note — the tab opens instantly, the server catches up |
 | ⌘⇧N | New task in this organisation, opened in a tab |
+| ⌘⌥T | All tasks as a table; ↑/↓ move, Return opens, right-click for the link |
 | ⌘J | Capture a spark |
 | ⌘⇧F | Search the organisation |
 | ⌘⌥1–7 | Notes, Tasks, Planner, Knowledge base, Sparks, Reminders, Inbox |
