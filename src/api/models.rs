@@ -315,6 +315,47 @@ pub struct Revision {
     pub is_current: bool,
 }
 
+// --------------------------------------------------------------- files
+
+/// A file on a task (added directly or posted in a comment) or on one
+/// article revision. `url` is presigned and minted per read: open it, never
+/// keep it.
+#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[serde(default)]
+pub struct FileItem {
+    pub id: String,
+    pub filename: String,
+    pub content_type: String,
+    pub size_bytes: Option<u64>,
+    pub url: String,
+    /// `None` until the worker has made one, or for anything not an image.
+    pub thumbnail_url: Option<String>,
+    /// Removed by removing its comment, not from the Files list.
+    pub from_comment: bool,
+    pub uploaded_by: Option<Person>,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+impl FileItem {
+    pub fn is_image(&self) -> bool {
+        self.content_type.starts_with("image/")
+    }
+}
+
+/// Step 1 of an upload: where to PUT the bytes, and the content type the
+/// signature covers — sent back byte for byte, not our own guess.
+#[derive(Clone, Debug, Deserialize)]
+pub struct UploadTicket {
+    pub attachment: UploadTicketAttachment,
+    pub upload_url: String,
+    pub content_type: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+pub struct UploadTicketAttachment {
+    pub id: String,
+}
+
 // -------------------------------------------------------------- tokens
 
 #[derive(Clone, Debug, Deserialize)]

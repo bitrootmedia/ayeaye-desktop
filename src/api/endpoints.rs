@@ -31,6 +31,16 @@ fn org(org_id: &str) -> String {
     format!("/api/organisations/{org_id}")
 }
 
+/// Where a task's files live.
+pub fn task_files_base(org_id: &str, task_id: &str) -> String {
+    format!("{}/tasks/{task_id}", org(org_id))
+}
+
+/// Where one article revision's files live.
+pub fn revision_files_base(org_id: &str, revision_id: &str) -> String {
+    format!("{}/kb/revisions/{revision_id}", org(org_id))
+}
+
 /// `key=value&…`, percent-encoded, skipping unset values.
 fn query(pairs: &[(&str, Option<String>)]) -> String {
     let parts: Vec<String> = pairs
@@ -416,6 +426,41 @@ impl ApiClient {
     pub fn search(&self, org_id: &str, q: &str) -> ApiResult<SearchResults> {
         let qs = query(&[("q", Some(q.to_owned())), ("limit", Some("30".into()))]);
         self.get(&format!("{}/search{qs}", org(org_id)))
+    }
+
+    // --------------------------------------------------------------- files
+    //
+    // A task and an article revision expose the same `{base}/files` shape;
+    // the base is the one thing that differs (`task_files_base`,
+    // `revision_files_base`). Uploads are the web app's three steps: a
+    // ticket, the bytes to storage, then confirm.
+
+    pub fn files(&self, base: &str) -> ApiResult<Vec<FileItem>> {
+        self.get(&format!("{base}/files"))
+    }
+
+    pub fn stage_file(
+        &self,
+        base: &str,
+        filename: &str,
+        content_type: &str,
+    ) -> ApiResult<UploadTicket> {
+        self.post(
+            &format!("{base}/files"),
+            &json!({ "filename": filename, "content_type": content_type }),
+        )
+    }
+
+    /// Step 3, shared by every anchor: the server checks the real size here.
+    pub fn confirm_attachment(&self, org_id: &str, attachment_id: &str) -> ApiResult<()> {
+        self.post_empty(
+            &format!("{}/attachments/{attachment_id}/confirm", org(org_id)),
+            &json!({}),
+        )
+    }
+
+    pub fn delete_file(&self, base: &str, file_id: &str) -> ApiResult<()> {
+        self.delete(&format!("{base}/files/{file_id}"))
     }
 
     // ------------------------------------------------------ access tokens

@@ -18,11 +18,13 @@ use gpui_kit::*;
 
 use crate::api::ApiError;
 use crate::api::models::{Article, Revision};
+use crate::api::revision_files_base;
 use crate::assets::Lucide;
 use crate::session::OrgCtx;
+use crate::ui::files::{FilesEvent, FilesPanel, drop_target};
 use crate::ui::format::ago_long;
 use crate::ui::item::{Item, ItemEvent};
-use crate::ui::widgets::{html_to_markdown, rich_text};
+use crate::ui::widgets::{html_to_markdown, markdown_text, rich_text};
 
 const SAVE_DEBOUNCE: Duration = Duration::from_millis(1000);
 
@@ -43,6 +45,8 @@ struct Editing {
     body: Entity<TextareaState>,
     dirty: bool,
     saving: bool,
+    /// The draft rendered instead of its source, to check it reads right.
+    preview: bool,
     saved_at: Option<chrono::DateTime<chrono::Utc>>,
     _subscriptions: Vec<Subscription>,
 }
@@ -55,8 +59,12 @@ pub struct ArticleView {
     error: Option<String>,
     editing: Option<Editing>,
     busy: bool,
+    /// The files on the revision on screen: the one being read, or the one
+    /// this edit session writes into.
+    files: Entity<FilesPanel>,
     focus_handle: FocusHandle,
     debounce: Option<Task<()>>,
+    _subscriptions: Vec<Subscription>,
     _tasks: Vec<Task<()>>,
 }
 
@@ -67,6 +75,13 @@ impl ArticleView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
+        let files = cx.new(|_| FilesPanel::new(ctx.clone(), "article"));
+        let subscriptions =
+            vec![
+                cx.subscribe(&files, |_, _, event: &FilesEvent, cx| match event {
+                    FilesEvent::AuthFailed(e) => cx.emit(ArticleEvent::AuthFailed(e.clone())),
+                }),
+            ];
         let mut view = Self {
             ctx,
             article_id,
@@ -75,8 +90,10 @@ impl ArticleView {
             error: None,
             editing: None,
             busy: false,
+            files,
             focus_handle: cx.focus_handle(),
             debounce: None,
+            _subscriptions: subscriptions,
             _tasks: Vec::new(),
         };
         view.reload(window, cx);
@@ -103,6 +120,7 @@ impl ArticleView {
                         this.article = Some(article);
                         this.revision = revision;
                         this.error = None;
+                        this.sync_files(cx);
                     }
                     Err(e) if e.is_auth() => cx.emit(ArticleEvent::AuthFailed(e)),
                     Err(e) => this.error = Some(e.to_string()),
@@ -182,10 +200,23 @@ impl ArticleView {
             body,
             dirty: false,
             saving: false,
+            preview: false,
             saved_at: revision.updated_at,
             _subscriptions: subscriptions,
         });
+        self.sync_files(cx);
         cx.emit(ItemEvent::Edited);
+    }
+
+    fn sync_files(&mut self, cx: &mut Context<Self>) {
+        let revision_id = match &self.editing {
+            Some(e) => Some(e.revision_id.clone()),
+            None => self.revision.as_ref().map(|r| r.id.clone()),
+        };
+        let base = revision_id.map(|id| revision_files_base(self.ctx.org_id(), &id));
+        let can_edit = self.article.as_ref().is_some_and(|a| a.can_edit());
+        self.files
+            .update(cx, |files, cx| files.set_target(base, can_edit, cx));
     }
 
     fn edited(&mut self, cx: &mut Context<Self>) {
@@ -247,6 +278,17 @@ impl ArticleView {
             })
             .ok();
         }));
+    }
+
+    fn toggle_preview(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(editing) = &mut self.editing else {
+            return;
+        };
+        editing.preview = !editing.preview;
+        if !editing.preview {
+            editing.body.update(cx, |b, cx| b.focus(window, cx));
+        }
+        cx.notify();
     }
 
     fn finish_editing(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -361,6 +403,15 @@ impl ArticleView {
             .ok();
         }));
     }
+}
+
+/// The title above a read article: the web app's `text-xl font-semibold`.
+pub fn read_title(title: impl Into<SharedString>) -> Div {
+    div()
+        .text_size(px(20.))
+        .line_height(px(28.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .child(title.into())
 }
 
 impl Focusable for ArticleView {
@@ -482,6 +533,22 @@ impl Render for ArticleView {
                             ),
                     )
                 })
+                .when_some(self.editing.as_ref().map(|e| e.preview), |this, preview| {
+                    this.child(
+                        Button::new("preview")
+                            .icon(if preview {
+                                Lucide::SquarePen
+                            } else {
+                                Lucide::Eye
+                            })
+                            .label(if preview { "Write" } else { "Preview" })
+                            .ghost()
+                            .small()
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.toggle_preview(window, cx)),
+                            ),
+                    )
+                })
                 .when(self.editing.is_some(), |this| {
                     this.child(
                         Button::new("done")
@@ -553,15 +620,48 @@ impl Render for ArticleView {
                         .line_height(px(36.))
                         .font_weight(FontWeight::SEMIBOLD),
                 )
+                .child(if e.preview {
+                    let draft = e.body.read(cx).value().to_string();
+                    div()
+                        .id("article-preview")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .child(
+                            div()
+                                .max_w(px(780.))
+                                .pb_8()
+                                .child(if draft.trim().is_empty() {
+                                    div()
+                                        .text_color(theme.muted_foreground)
+                                        .child("Nothing to preview yet.")
+                                        .into_any_element()
+                                } else {
+                                    markdown_text("article-preview-body", &draft)
+                                }),
+                        )
+                        .into_any_element()
+                } else {
+                    div()
+                        .flex_1()
+                        .min_h_0()
+                        .child(
+                            Textarea::new(&e.body)
+                                .appearance(false)
+                                .h_full()
+                                .font_family(mono)
+                                .text_size(px(14.))
+                                .line_height(relative(1.6)),
+                        )
+                        .into_any_element()
+                })
                 .child(
-                    div().flex_1().min_h_0().child(
-                        Textarea::new(&e.body)
-                            .appearance(false)
-                            .h_full()
-                            .font_family(mono)
-                            .text_size(px(14.))
-                            .line_height(relative(1.6)),
-                    ),
+                    div()
+                        .id("article-files")
+                        .flex_none()
+                        .max_h(px(260.))
+                        .overflow_y_scroll()
+                        .child(self.files.clone()),
                 )
                 .into_any_element(),
             (None, Some(rev), Some(article)) => div()
@@ -573,16 +673,11 @@ impl Render for ArticleView {
                         .max_w(px(780.))
                         .gap_4()
                         .pb_8()
-                        .child(
-                            div()
-                                .text_size(px(26.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .child(if rev.title.is_empty() {
-                                    article.title.clone()
-                                } else {
-                                    rev.title.clone()
-                                }),
-                        )
+                        .child(read_title(if rev.title.is_empty() {
+                            article.title.clone()
+                        } else {
+                            rev.title.clone()
+                        }))
                         .child(if rev.body.trim().is_empty() {
                             div()
                                 .text_color(theme.muted_foreground)
@@ -590,7 +685,8 @@ impl Render for ArticleView {
                                 .into_any_element()
                         } else {
                             rich_text(SharedString::from(format!("article-{}", rev.id)), &rev.body)
-                        }),
+                        })
+                        .child(self.files.clone()),
                 )
                 .into_any_element(),
             (None, None, Some(article)) => v_flex()
@@ -614,7 +710,8 @@ impl Render for ArticleView {
                 .into_any_element(),
         };
 
-        v_flex()
+        let view = v_flex()
+            .id("article-view")
             .track_focus(&self.focus_handle)
             .size_full()
             .bg(theme.background)
@@ -633,6 +730,7 @@ impl Render for ArticleView {
                         .child(e),
                 )
             })
-            .child(body)
+            .child(body);
+        drop_target(view, &self.files, cx)
     }
 }

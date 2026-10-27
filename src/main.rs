@@ -40,7 +40,17 @@ fn main() {
 
             cx.on_action(|_: &actions::Quit, cx| cx.quit());
             cx.on_action(|_: &actions::About, cx| {
-                cx.open_url("https://github.com/bitrootmedia/ayeaye");
+                // A menu action arrives while the window is mid-update, so
+                // the dialog opens on the next turn rather than inside it.
+                let Some(window) = cx.active_window().or_else(|| cx.windows().first().copied())
+                else {
+                    return;
+                };
+                cx.defer(move |cx| {
+                    window
+                        .update(cx, |_, window, cx| ui::about::open(window, cx))
+                        .ok();
+                });
             });
             // One window, so closing it is quitting — unsaved notes are
             // flushed by the workspace's quit hook either way.
@@ -58,6 +68,15 @@ fn main() {
                 app_id: Some("com.bitroot.ayeaye-desktop".into()),
                 ..TitleBar::window_options()
             };
+            #[cfg(feature = "devtools")]
+            if let Some(path) = std::env::var_os("AYEAYE_RICH_TEXT") {
+                let (window, _) = gpui_kit::open_window(options, cx, |_, cx| {
+                    cx.new(|_| devtools::RichTextPreview::new(path.into()))
+                })
+                .expect("failed to open the window");
+                devtools::run_script(window, cx);
+                return;
+            }
             let (_window, _) = gpui_kit::open_window(options, cx, |window, cx| {
                 window.set_window_title("Ayeaye");
                 cx.new(|cx| AppView::new(window, cx))

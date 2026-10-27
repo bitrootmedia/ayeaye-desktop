@@ -18,5 +18,5 @@ check:
 app:            ## dist/Ayeaye.app (macOS)
 	script/bundle-macos.sh
 
-install: app    ## copy it to ~/Applications
-	rm -rf ~/Applications/Ayeaye.app && cp -R dist/Ayeaye.app ~/Applications/
+install: app    ## copy it to /Applications, the copy Spotlight and the Dock open
+	rm -rf /Applications/Ayeaye.app && cp -R dist/Ayeaye.app /Applications/

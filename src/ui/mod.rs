@@ -1,4 +1,6 @@
+pub mod about;
 pub mod auth;
+pub mod files;
 pub mod format;
 pub mod item;
 pub mod modules;

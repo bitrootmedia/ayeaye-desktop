@@ -40,6 +40,10 @@ gpui_kit::assets::icon_assets!(
         TextAlignStart,
         ListChecks,
         Table,
+        Eye,
+        Paperclip,
+        AudioLines,
+        File,
     ]
 );
 

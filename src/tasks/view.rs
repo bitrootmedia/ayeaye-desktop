@@ -19,9 +19,10 @@ use serde_json::{Value, json};
 
 use crate::api::models::Task as TaskData;
 use crate::api::models::*;
-use crate::api::{ApiClient, ApiError, ApiResult};
+use crate::api::{ApiClient, ApiError, ApiResult, task_files_base};
 use crate::session::OrgCtx;
 use crate::timer::TimerState;
+use crate::ui::files::{FilesEvent, FilesPanel, drop_target};
 use crate::ui::format::ago_long;
 use crate::ui::item::{Item, ItemEvent};
 use crate::ui::widgets::{
@@ -58,6 +59,7 @@ pub struct TaskView {
     new_checklist: Entity<InputState>,
     comment: Entity<TextareaState>,
     reminder_date: Entity<InputState>,
+    files: Entity<FilesPanel>,
     focus_handle: FocusHandle,
     scroll: ScrollHandle,
     comments_scroll: ScrollHandle,
@@ -82,7 +84,11 @@ impl TaskView {
         });
         let reminder_date =
             cx.new(|cx| InputState::new(window, cx).placeholder("Date: 2026-11-03, 3.11, +7"));
+        let files = cx.new(|_| FilesPanel::new(ctx.clone(), "task"));
         let subscriptions = vec![
+            cx.subscribe(&files, |_, _, event: &FilesEvent, cx| match event {
+                FilesEvent::AuthFailed(e) => cx.emit(TaskViewEvent::AuthFailed(e.clone())),
+            }),
             cx.subscribe_in(&title, window, Self::on_title_event),
             cx.subscribe_in(&new_checklist, window, Self::on_new_checklist_event),
             cx.subscribe_in(&comment, window, Self::on_comment_event),
@@ -108,6 +114,7 @@ impl TaskView {
             new_checklist,
             comment,
             reminder_date,
+            files,
             focus_handle: cx.focus_handle(),
             scroll: ScrollHandle::new(),
             comments_scroll: ScrollHandle::new(),
@@ -126,6 +133,7 @@ impl TaskView {
         let client = self.ctx.client();
         let org_id = self.org_id();
         let task_id = self.task_id.clone();
+        self.files.update(cx, |files, cx| files.reload(cx));
         let task = cx.spawn_in(window, async move |this, cx| {
             let result = cx
                 .background_spawn(async move {
@@ -167,6 +175,9 @@ impl TaskView {
         }
         let editable = task.can_edit();
         self.title.update(cx, |t, cx| t.set_readonly(!editable, cx));
+        let base = task_files_base(self.ctx.org_id(), &self.task_id);
+        self.files
+            .update(cx, |files, cx| files.set_target(Some(base), editable, cx));
         self.task = Some(task);
     }
 
@@ -1400,6 +1411,7 @@ impl Render for TaskView {
                     .child(self.render_fields(&task, cx))
                     .child(self.render_description(&task, cx))
                     .child(self.render_checklists(&task, cx))
+                    .child(self.files.clone())
                     .child(self.render_reminders(cx))
                     .when(!split, |this| {
                         this.child(
@@ -1432,7 +1444,7 @@ impl Render for TaskView {
         };
         let loaded = self.task.is_some();
 
-        h_flex()
+        let view = h_flex()
             .id("task-view")
             .track_focus(&self.focus_handle)
             .size_full()
@@ -1458,6 +1470,7 @@ impl Render for TaskView {
                         .border_color(theme.border)
                         .child(self.render_comments(cx)),
                 )
-            })
+            });
+        drop_target(view, &self.files, cx)
     }
 }

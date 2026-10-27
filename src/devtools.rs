@@ -11,13 +11,54 @@
 //!
 //! Steps: `wait <ms>`, `shot <name>`, `keys <keystroke> …`, `type <text>`,
 //! `click <x> <y>` / `dclick <x> <y>` / `rclick <x> <y>` in window points,
-//! `scroll <x> <y> <dy>` (positive scrolls down),
+//! `scroll <x> <y> <dy>` (positive scrolls down), `about` (the menu item,
+//! dispatched the way the menu bar does it), `drop <x> <y> <path>…` (files
+//! dragged in from Finder and let go there),
 //! `quit`.
+//!
+//! `AYEAYE_RICH_TEXT=<file>` opens no workspace: the window shows that file
+//! as an article body, laid out as the reader lays it out — for comparing
+//! the rendering with the web app's without signing in.
 
 use std::path::PathBuf;
 use std::time::Duration;
 
+use gpui_kit::component::{ActiveTheme as _, v_flex};
 use gpui_kit::*;
+
+pub struct RichTextPreview {
+    body: String,
+}
+
+impl RichTextPreview {
+    pub fn new(path: PathBuf) -> Self {
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| format!("could not read {}: {e}", path.display()));
+        Self { body }
+    }
+}
+
+impl Render for RichTextPreview {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .id("preview")
+            .size_full()
+            .overflow_y_scroll()
+            .bg(cx.theme().background)
+            .px_6()
+            .py_4()
+            .child(
+                v_flex()
+                    .max_w(px(780.))
+                    .gap_4()
+                    .pb_8()
+                    .child(crate::kb::article::read_title(
+                        "Hindsight — setting up Claude Code",
+                    ))
+                    .child(crate::ui::widgets::rich_text("preview-body", &self.body)),
+            )
+    }
+}
 
 pub fn run_script(window: AnyWindowHandle, cx: &mut App) {
     let Ok(script) = std::env::var("AYEAYE_SCRIPT") else {
@@ -152,6 +193,25 @@ pub fn run_script(window: AnyWindowHandle, cx: &mut App) {
                             }),
                             cx,
                         );
+                    }
+                    "about" => window.dispatch_action(Box::new(crate::actions::About), cx),
+                    "drop" => {
+                        let mut parts = rest.split_whitespace();
+                        let (Some(x), Some(y)) = (
+                            parts.next().and_then(|p| p.parse::<f32>().ok()),
+                            parts.next().and_then(|p| p.parse::<f32>().ok()),
+                        ) else {
+                            return;
+                        };
+                        let position = point(px(x), px(y));
+                        let paths = ExternalPaths(parts.map(PathBuf::from).collect());
+                        for event in [
+                            FileDropEvent::Entered { position, paths },
+                            FileDropEvent::Pending { position },
+                            FileDropEvent::Submit { position },
+                        ] {
+                            window.dispatch_event(PlatformInput::FileDrop(event), cx);
+                        }
                     }
                     other => eprintln!("unknown step: {other}"),
                 }

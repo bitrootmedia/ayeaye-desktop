@@ -8,14 +8,18 @@ The rail at the left holds the modules. The organisation's:
 
 - **Notes** — the notepad that replaces a folder of loose text files
 - **Tasks** — Waiting on me, Mine, Triage, All open, by project; a task opens
-  in a tab with its fields, description, checklists, reminders, comments and
-  the timer. ⌘⌥T (or the table button on the list) opens every task as the
+  in a tab with its fields, description, checklists, files, reminders,
+  comments and the timer. ⌘⌥T (or the table button on the list) opens every task as the
   web app's table: project, status, priority, owner, action required, due,
   created and updated columns, sorted by the server on any of them, filtered
   on all of them plus tag and closed, paged with the total always shown
 - **My planner** — Today, Tomorrow, This week, Next week, Someday
 - **Knowledge base** — books and articles; read rendered, edit as markdown,
-  publish
+  publish, attach files
+
+A task's or an article's Files panel takes "Add a file" or files dropped
+anywhere on the tab, uploaded the web app's way (straight to storage on a
+presigned URL, then confirmed); click a file to open it in the browser.
 
 and the person's own, which ignore the organisation:
 
@@ -39,7 +43,7 @@ switch inside a profile.
 ```sh
 make run          # release build
 make dev          # debug build, tokens in a file (see below)
-make install      # dist/Ayeaye.app → ~/Applications
+make install      # dist/Ayeaye.app → /Applications
 make test         # unit tests, no server needed
 make live-test    # against a real instance (AYEAYE_TEST_SERVER/EMAIL/PASSWORD)
 ```

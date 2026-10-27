@@ -3,7 +3,7 @@
 use chrono::{Datelike, Duration, Local, NaiveDate, Weekday};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
-use gpui_kit::component::text::TextView;
+use gpui_kit::component::text::{TextView, TextViewStyle};
 use gpui_kit::component::{ActiveTheme as _, Sizable as _, Theme, h_flex, v_flex};
 use gpui_kit::*;
 
@@ -37,13 +37,20 @@ pub fn section_label(label: impl Into<SharedString>, cx: &App) -> Div {
         .child(label.into())
 }
 
-/// A body from the server: sanitised HTML, or — for old rows with no `<`
-/// in them — plain text, shown with its line breaks.
+/// A body from the server: sanitised HTML, or — for rows written before the
+/// server converted markdown on the way in — the text as it was sent. That
+/// text is often markdown (an agent's `## Steps`), so it renders as markdown
+/// when it looks like it, and as plain lines, line breaks kept, when not.
+///
+/// HTML is shown through the markdown renderer too, converted first: GPUI
+/// Kit's HTML view loses any paragraph, list item or code block with inline
+/// `<code>` in it to a grey placeholder bar, and the server's tag set is
+/// exactly what markdown can say.
 pub fn rich_text(id: impl Into<ElementId>, body: &str) -> AnyElement {
-    if body.contains('<') {
-        TextView::html(id, body.to_owned())
-            .selectable(true)
-            .into_any_element()
+    if is_html(body) {
+        markdown_text(id, &html_body_as_markdown(body))
+    } else if looks_like_markdown(body) {
+        markdown_text(id, body)
     } else {
         div()
             .whitespace_normal()
@@ -55,10 +62,157 @@ pub fn rich_text(id: impl Into<ElementId>, body: &str) -> AnyElement {
     }
 }
 
+/// Converted once per distinct body, not once per frame.
+fn html_body_as_markdown(html: &str) -> std::rc::Rc<str> {
+    use std::collections::HashMap;
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    thread_local! {
+        static CACHE: std::cell::RefCell<HashMap<u64, std::rc::Rc<str>>> = Default::default();
+    }
+    let mut hasher = DefaultHasher::new();
+    html.hash(&mut hasher);
+    let key = hasher.finish();
+    CACHE.with_borrow_mut(|cache| {
+        if let Some(hit) = cache.get(&key) {
+            return hit.clone();
+        }
+        if cache.len() > 256 {
+            cache.clear();
+        }
+        let markdown: std::rc::Rc<str> = split_markdown_tables(html)
+            .into_iter()
+            .map(|segment| match segment {
+                Segment::Html(html) => html_to_markdown(&html),
+                Segment::Table(table) => table,
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+            .into();
+        cache.insert(key, markdown.clone());
+        markdown
+    })
+}
+
+/// Markdown rendered: a body that never went through the server's
+/// conversion, or an editor's draft in preview.
+///
+/// Sized as the web app's `.prose-task` (index.css), so a body reads the
+/// same in both: 14px text at 1.625, 12px between blocks, `h2` at 16px and
+/// `h3` at 14px, code blocks at 12px.
+pub fn markdown_text(id: impl Into<ElementId>, markdown: &str) -> AnyElement {
+    let style = TextViewStyle::default()
+        .paragraph_gap(rems(0.75))
+        .heading_font_size(|level, _| if level <= 2 { px(16.) } else { px(14.) })
+        .code_block(StyleRefinement::default().text_size(px(12.)));
+    TextView::markdown(id, markdown.to_owned())
+        .style(style)
+        .selectable(true)
+        .text_size(px(14.))
+        .line_height(relative(1.625))
+        .into_any_element()
+}
+
+/// A stretch of an HTML body, for rendering.
+#[derive(Debug, PartialEq)]
+enum Segment {
+    Html(String),
+    /// A markdown table the server couldn't keep: its allow-list has no
+    /// table tags and its markdown conversion no table extension, so
+    /// `| a | b |` lines arrive as one `<p>`, pipes and all — and converting
+    /// that paragraph would fold its lines into one.
+    Table(String),
+}
+
+fn split_markdown_tables(html: &str) -> Vec<Segment> {
+    let mut segments = Vec::new();
+    let mut pending = String::new();
+    let mut rest = html;
+    while let Some(start) = rest.find("<p>") {
+        let Some(len) = rest[start..].find("</p>") else {
+            break;
+        };
+        let end = start + len + 4;
+        match markdown_table(&rest[start + 3..start + len]) {
+            Some(table) => {
+                pending.push_str(&rest[..start]);
+                if !pending.trim().is_empty() {
+                    segments.push(Segment::Html(std::mem::take(&mut pending)));
+                }
+                pending.clear();
+                segments.push(Segment::Table(table));
+            }
+            None => pending.push_str(&rest[..end]),
+        }
+        rest = &rest[end..];
+    }
+    pending.push_str(rest);
+    if !pending.trim().is_empty() {
+        segments.push(Segment::Html(pending));
+    }
+    segments
+}
+
+/// `| h | h |` / `|---|---|` / rows inside a paragraph, back to markdown;
+/// each cell's inline markup (`<code>`, `<strong>`) converted with it.
+fn markdown_table(inner: &str) -> Option<String> {
+    let lines: Vec<&str> = inner
+        .split('\n')
+        .flat_map(|l| l.split("<br>"))
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    if lines.len() < 2 || !lines.iter().all(|l| l.starts_with('|')) {
+        return None;
+    }
+    let separator =
+        lines[1].chars().all(|c| matches!(c, '|' | '-' | ':' | ' ')) && lines[1].contains('-');
+    if !separator {
+        return None;
+    }
+    let row = |line: &str| {
+        let line = line.trim_start_matches('|');
+        let line = line.strip_suffix('|').unwrap_or(line);
+        let cells: Vec<String> = line
+            .split('|')
+            .map(|c| html_to_markdown(c.trim()).replace('\n', " "))
+            .collect();
+        format!("| {} |", cells.join(" | "))
+    };
+    let mut out = vec![row(lines[0]), lines[1].to_owned()];
+    out.extend(lines[2..].iter().map(|l| row(l)));
+    Some(out.join("\n"))
+}
+
+/// Markup, not just a `<`: `a < b` or `x<y` in markdown is not a tag.
+fn is_html(body: &str) -> bool {
+    let bytes = body.as_bytes();
+    bytes
+        .windows(2)
+        .any(|w| w[0] == b'<' && (w[1].is_ascii_alphabetic() || w[1] == b'/' || w[1] == b'!'))
+        && body.contains('>')
+}
+
+/// Markdown syntax a plain sentence wouldn't have by accident. Plain text
+/// shouldn't go through markdown: its single line breaks would fold into
+/// one paragraph.
+fn looks_like_markdown(body: &str) -> bool {
+    let block = body.lines().any(|line| {
+        let l = line.trim_start();
+        let heading = l.trim_start_matches('#');
+        (heading.len() < l.len() && l.len() - heading.len() <= 6 && heading.starts_with(' '))
+            || ["- ", "* ", "+ ", "> ", "```", "|"]
+                .iter()
+                .any(|p| l.starts_with(p))
+            || l.split_once(". ")
+                .is_some_and(|(n, _)| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
+    });
+    block || body.contains("**") || body.contains('`') || body.contains("](")
+}
+
 /// HTML from the server as markdown to edit. The server takes markdown back
 /// (`*_format: markdown`), so this is the whole round trip.
 pub fn html_to_markdown(html: &str) -> String {
-    if !html.contains('<') {
+    if !is_html(html) {
         return html.to_owned();
     }
     htmd::convert(html).unwrap_or_else(|_| html.to_owned())
@@ -259,5 +413,58 @@ mod tests {
     fn markdown_round_trip_starts_from_html() {
         assert_eq!(html_to_markdown("plain\ntext"), "plain\ntext");
         assert!(html_to_markdown("<p><strong>bold</strong></p>").contains("**bold**"));
+        assert_eq!(html_to_markdown("if a < b"), "if a < b");
+    }
+
+    #[::core::prelude::v1::test]
+    fn markdown_tables_in_paragraphs_become_tables() {
+        let html = "<h2>Tags</h2>\n<p>| Tag | Use for |\n|---|---|\n| <code>app:NAME</code> | the app |</p>\n<p>after | this</p>";
+        assert_eq!(
+            split_markdown_tables(html),
+            vec![
+                Segment::Html("<h2>Tags</h2>\n".into()),
+                Segment::Table("| Tag | Use for |\n|---|---|\n| `app:NAME` | the app |".into()),
+                Segment::Html("\n<p>after | this</p>".into()),
+            ]
+        );
+        let plain = "<p>| not a table</p><p>a</p>";
+        assert_eq!(
+            split_markdown_tables(plain),
+            vec![Segment::Html(plain.into())]
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn html_bodies_read_as_markdown() {
+        let html = "<h2>Step 1</h2>\n<p>members of <code>group:admins</code></p>\n<ol>\n<li><strong>Get the key</strong></li>\n</ol>\n<p>| a | b |\n|---|---|\n| <code>x</code> | y |</p>";
+        let md = html_body_as_markdown(html);
+        for part in [
+            "## Step 1",
+            "members of `group:admins`",
+            "1.  **Get the key**",
+            "| a | b |\n|---|---|\n| `x` | y |",
+        ] {
+            assert!(md.contains(part), "{part:?} not in {md:?}");
+        }
+    }
+
+    #[::core::prelude::v1::test]
+    fn bodies_are_told_apart() {
+        assert!(is_html("<p>hi</p>"));
+        assert!(!is_html("a < b and c > d"));
+        assert!(!is_html("x<5"));
+        for md in [
+            "## Steps\nrun it",
+            "intro\n- one\n- two",
+            "1. first",
+            "use `make`",
+            "**bold**",
+            "[a](b)",
+        ] {
+            assert!(looks_like_markdown(md), "{md}");
+        }
+        for plain in ["just a note\nsecond line", "#hashtag", "Version 2.0 is out"] {
+            assert!(!looks_like_markdown(plain), "{plain}");
+        }
     }
 }

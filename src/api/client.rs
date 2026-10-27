@@ -360,6 +360,50 @@ impl ApiClient {
         })
     }
 
+    // ------------------------------------------------------------- storage
+
+    /// Bytes straight to storage on a presigned URL: no session headers (the
+    /// signature is the credential, and an extra header can break it), and
+    /// `Content-Type` exactly as the ticket signed it.
+    pub fn put_to_storage(&self, url: &str, content_type: &str, bytes: &[u8]) -> ApiResult<()> {
+        let mut response = storage_agent()
+            .put(url)
+            .header("Content-Type", content_type)
+            .send(bytes)
+            .map_err(|e| self.network_error(e))?;
+        let status = response.status().as_u16();
+        if (200..300).contains(&status) {
+            return Ok(());
+        }
+        let text = response.body_mut().read_to_string().unwrap_or_default();
+        log::warn!("storage refused an upload ({status}): {text}");
+        Err(ApiError::Server {
+            status,
+            message: format!("Storage refused the upload ({status})"),
+        })
+    }
+
+    /// A presigned GET — a thumbnail to draw.
+    pub fn get_from_storage(&self, url: &str) -> ApiResult<Vec<u8>> {
+        let mut response = storage_agent()
+            .get(url)
+            .call()
+            .map_err(|e| self.network_error(e))?;
+        let status = response.status().as_u16();
+        if !(200..300).contains(&status) {
+            return Err(ApiError::Server {
+                status,
+                message: format!("Storage answered {status}"),
+            });
+        }
+        response
+            .body_mut()
+            .with_config()
+            .limit(STORAGE_READ_LIMIT)
+            .read_to_vec()
+            .map_err(|e| self.network_error(e))
+    }
+
     fn network_error(&self, error: ureq::Error) -> ApiError {
         let host = self.base_url.as_str();
         ApiError::Network(match error {
@@ -374,6 +418,24 @@ impl ApiClient {
             }
         })
     }
+}
+
+/// Thumbnails are 480px; anything bigger than this isn't one.
+const STORAGE_READ_LIMIT: u64 = 8 * 1024 * 1024;
+
+/// Its own agent: a 50MB upload on a slow line outlasts the API's 30-second
+/// budget by a long way, and none of the API agent's headers belong here.
+fn storage_agent() -> &'static ureq::Agent {
+    static AGENT: std::sync::OnceLock<ureq::Agent> = std::sync::OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_connect(Some(Duration::from_secs(10)))
+            .timeout_global(Some(Duration::from_secs(30 * 60)))
+            .user_agent(concat!("ayeaye-desktop/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .into()
+    })
 }
 
 struct RawResponse {

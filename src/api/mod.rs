@@ -5,7 +5,7 @@ pub mod session;
 pub mod socket;
 
 pub use client::{ApiClient, ApiError, ApiResult, SignInOutcome, normalise_base_url};
-pub use endpoints::TaskQuery;
+pub use endpoints::{TaskQuery, revision_files_base, task_files_base};
 use serde_json::json;
 
 use models::{MAX_TITLE_LENGTH, Me, Note, Organisation};
@@ -285,6 +285,79 @@ mod live {
             client.notes("00000000-0000-0000-0000-000000000000"),
             Err(ApiError::NotFound(_))
         ));
+    }
+
+    /// Files, the web app's three steps: on a task and on an article
+    /// revision — ticket, bytes to storage, confirm — then listed with a
+    /// thumbnail that fetches, and removed.
+    #[::core::prelude::v1::test]
+    #[ignore]
+    fn live_files_upload_list_and_remove() {
+        // A 1×1 PNG.
+        const DOT: &[u8] = &[
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48,
+            0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x06, 0x00, 0x00,
+            0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44, 0x41, 0x54, 0x78,
+            0xDA, 0x63, 0xFC, 0xCF, 0xC0, 0x50, 0x0F, 0x00, 0x04, 0x85, 0x01, 0x80, 0x84, 0xA9,
+            0x8C, 0x21, 0x00, 0x00, 0x00, 0x00, 0x49, 0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        ];
+        let client = ApiClient::new(env("AYEAYE_TEST_SERVER"), Default::default(), |_| {});
+        client
+            .sign_in(&env("AYEAYE_TEST_EMAIL"), &env("AYEAYE_TEST_PASSWORD"))
+            .unwrap();
+        let org = client.organisations().unwrap().remove(0);
+        let upload = |base: &str, name: &str, content_type: &str, bytes: &[u8]| {
+            let ticket = client.stage_file(base, name, content_type).unwrap();
+            client
+                .put_to_storage(&ticket.upload_url, &ticket.content_type, bytes)
+                .unwrap();
+            client
+                .confirm_attachment(&org.id, &ticket.attachment.id)
+                .unwrap();
+            ticket.attachment.id
+        };
+
+        let task = client
+            .create_task(&org.id, serde_json::json!({"title": "desktop files test"}))
+            .unwrap();
+        let base = task_files_base(&org.id, &task.id);
+        let png = upload(&base, "dot.png", "image/png", DOT);
+        upload(
+            &base,
+            "notes.txt",
+            "text/plain",
+            b"hello from the desktop\n",
+        );
+        let files = client.files(&base).unwrap();
+        let names: Vec<&str> = files.iter().map(|f| f.filename.as_str()).collect();
+        assert!(
+            names.contains(&"dot.png") && names.contains(&"notes.txt"),
+            "{names:?}"
+        );
+        let dot = files.iter().find(|f| f.id == png).unwrap();
+        assert_eq!(dot.size_bytes, Some(DOT.len() as u64));
+        assert!(dot.is_image() && !dot.from_comment);
+        let fetched = client
+            .get_from_storage(dot.thumbnail_url.as_deref().unwrap_or(&dot.url))
+            .unwrap();
+        assert!(fetched.starts_with(b"\x89PNG") || fetched.starts_with(&[0xFF, 0xD8]));
+        assert!(matches!(
+            client.stage_file(&base, "x.zip", "application/zip"),
+            Err(ApiError::Server { .. })
+        ));
+        client.delete_file(&base, &png).unwrap();
+        assert_eq!(client.files(&base).unwrap().len(), 1);
+        client.set_task_closed(&org.id, &task.id, true).unwrap();
+
+        let book = client.create_book(&org.id, "desktop files book").unwrap();
+        let article = client
+            .create_article(&org.id, &book.id, "desktop files article")
+            .unwrap();
+        let rev = client.start_edit_session(&org.id, &article.id).unwrap();
+        let base = revision_files_base(&org.id, &rev.id);
+        upload(&base, "dot.png", "image/png", DOT);
+        assert_eq!(client.files(&base).unwrap().len(), 1);
+        client.delete_article(&org.id, &article.id).unwrap();
     }
 
     /// The socket: a minted read token gets in, a task change and a comment
