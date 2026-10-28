@@ -12,6 +12,16 @@ pub struct Me {
     pub email: Option<String>,
     pub display_name: Option<String>,
     pub timezone: Option<String>,
+    /// "Heads-down on the refit today": a line colleagues see beside the name.
+    pub status_message: Option<String>,
+    pub daily_summary_enabled: bool,
+    /// In the person's own timezone.
+    pub daily_summary_hour: i64,
+    /// Only sent to organisation admins, so only offered to them.
+    pub weekly_report_enabled: bool,
+    /// `telegram`, `apps` or `off`.
+    pub timer_check_ins: String,
+    pub timer_check_ins_per_day: i64,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -80,14 +90,50 @@ impl Member {
     }
 }
 
+/// A project as the caller sees it: private to its owner until shared, so
+/// `access` is this person's level (`read`, `write` or `owner`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Project {
     pub id: String,
     pub name: String,
+    pub description: Option<String>,
+    pub project_group_id: Option<String>,
     pub project_group_name: Option<String>,
+    pub owner: Option<Person>,
     pub archived: bool,
+    pub access: String,
     pub open_task_count: i64,
+    /// Open and critical, urgent or high.
+    pub important_task_count: i64,
+}
+
+impl Project {
+    /// Name, description and group.
+    pub fn can_edit(&self) -> bool {
+        matches!(self.access.as_str(), "write" | "owner")
+    }
+
+    /// Archiving, sharing, handing over, deleting: the owner's alone.
+    pub fn is_owner(&self) -> bool {
+        self.access == "owner"
+    }
+
+    pub fn access_label(&self) -> &'static str {
+        match self.access.as_str() {
+            "owner" => "Owner",
+            "write" => "Can edit",
+            _ => "Can view",
+        }
+    }
+}
+
+/// A label for tidiness: filing a project in one grants nobody access.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProjectGroup {
+    pub id: String,
+    pub name: String,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -417,6 +463,7 @@ pub struct Notification {
 pub enum LinkTarget {
     Task { org_id: String, task_id: String },
     Book { org_id: String, book_id: String },
+    Person { org_id: String, user_id: String },
 }
 
 pub fn parse_link(path: &str) -> Option<LinkTarget> {
@@ -430,8 +477,330 @@ pub fn parse_link(path: &str) -> Option<LinkTarget> {
             org_id: (*org).into(),
             book_id: (*book).into(),
         }),
+        ["orgs", org, "people", user, ..] => Some(LinkTarget::Person {
+            org_id: (*org).into(),
+            user_id: (*user).into(),
+        }),
         _ => None,
     }
+}
+
+// ----------------------------------------------------------------- people
+
+/// One hour of one weekday somebody plans to be around: `weekday` is
+/// 0 = Monday … 6 = Sunday, as the server's Python `date.weekday()` counts.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkingHourCell {
+    pub weekday: u8,
+    pub hour: u8,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WorkingHours {
+    /// IANA, or none for someone who has never opened an app.
+    pub timezone: Option<String>,
+    pub cells: Vec<WorkingHourCell>,
+}
+
+/// A stretch of out-of-office. Dates are `YYYY-MM-DD`, both included.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Absence {
+    pub id: String,
+    pub starts_on: String,
+    pub ends_on: String,
+    pub note: Option<String>,
+    /// Who, on an organisation's list; absent on someone's own.
+    pub person: Option<Person>,
+    /// Away today, as opposed to some time in the next fortnight.
+    pub away_now: bool,
+}
+
+/// A task on a colleague's profile. `is_owner` and `is_action_required` are
+/// from *their* side, not the viewer's.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProfileTask {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub priority: String,
+    pub project_name: Option<String>,
+    pub due_on: Option<String>,
+    pub is_owner: bool,
+    pub is_action_required: bool,
+    pub is_open: bool,
+    pub updated_at: Option<DateTime<Utc>>,
+    pub closed_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ProfileTimer {
+    pub task: ProfileTask,
+    pub started_at: Option<DateTime<Utc>>,
+}
+
+/// A colleague, for "is now a good time, and what are they on?". Their
+/// tasks and timer reach only as far as the viewer's own task access.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MemberProfile {
+    pub id: String,
+    pub email: String,
+    pub display_name: Option<String>,
+    pub role: String,
+    pub joined_at: Option<DateTime<Utc>>,
+    pub timezone: Option<String>,
+    pub status_message: Option<String>,
+    pub working_hours: Vec<WorkingHourCell>,
+    pub away: Vec<Absence>,
+    /// Only when the timer is on a task the viewer can see.
+    pub working_on: Option<ProfileTimer>,
+    pub open_tasks: Vec<ProfileTask>,
+    /// How many open tasks of theirs the viewer can see in all.
+    pub open_total: i64,
+    pub recently_closed: Vec<ProfileTask>,
+}
+
+impl MemberProfile {
+    pub fn name(&self) -> String {
+        self.display_name
+            .clone()
+            .filter(|n| !n.trim().is_empty())
+            .unwrap_or_else(|| self.email.clone())
+    }
+}
+
+pub fn role_label(role: &str) -> &str {
+    match role {
+        "owner" => "Owner",
+        "admin" => "Admin",
+        "member" => "Member",
+        "guest" => "Guest",
+        other => other,
+    }
+}
+
+// ---------------------------------------------------------------- account
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MfaStatus {
+    pub enrolled: bool,
+    pub codes_remaining: i64,
+}
+
+/// A fresh authenticator secret and its QR; nothing is kept until a code
+/// from it is verified.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TotpDevice {
+    pub secret: String,
+    /// `data:image/png;base64,…`
+    pub qr_data_uri: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct BackupCodes {
+    pub codes: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct AccessToken {
+    pub id: String,
+    pub name: String,
+    /// `read` or `write`.
+    pub scope: String,
+    pub prefix: String,
+    pub last_used_at: Option<DateTime<Utc>>,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+/// An app that connected itself over OAuth, rather than a pasted token.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OAuthGrant {
+    pub id: String,
+    pub client_name: String,
+    pub scope: String,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct NotificationChannel {
+    pub id: String,
+    /// `email`, `telegram` or `webhook`.
+    pub kind: String,
+    pub label: String,
+    pub enabled_kinds: Vec<String>,
+    /// None for a Telegram link nobody has tapped `/start` on yet.
+    pub verified_at: Option<DateTime<Utc>>,
+    /// The webhook's own URL, never its secret.
+    pub url: Option<String>,
+    /// Where a linked Telegram chat's `/task` files tasks; set from Telegram.
+    pub default_organisation_id: Option<String>,
+}
+
+/// A webhook, with the signing secret shown this once.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebhookCreated {
+    pub id: String,
+    pub secret: String,
+}
+
+/// The notification kinds a channel can carry, labelled as the web app
+/// labels them in its routing table.
+pub const NOTIFICATION_KINDS: &[(&str, &str)] = &[
+    ("task_action_required", "Asked to act on a task"),
+    ("task_action_required_cleared", "Handed back to you"),
+    ("task_owner_changed", "Given ownership of a task"),
+    ("task_closed", "A task you own was closed"),
+    ("task_shared", "A task was shared with you"),
+    ("project_shared", "A project was shared with you"),
+    ("reminder_soon", "Reminder, the day before"),
+    ("reminder_due", "Reminder, on the day"),
+    ("task_deadline_tomorrow", "A task is due tomorrow"),
+    ("daily_summary", "Daily summary"),
+    ("export_ready", "A data export finished"),
+    ("book_shared", "A book was shared with you"),
+    ("comment_mention", "Mentioned in a comment"),
+    ("timer_paused", "Your timer was paused while you were away"),
+    (
+        "weekly_report",
+        "Weekly report (organisations you administer)",
+    ),
+];
+
+/// Where one organisation's mail goes for this person. `pending` is asked
+/// for and not yet confirmed — *not* in use.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OrganisationEmail {
+    pub organisation_id: String,
+    pub organisation_name: String,
+    pub email: Option<String>,
+    pub pending: Option<String>,
+    pub effective: Option<String>,
+}
+
+// --------------------------------------------------------------- dashboard
+
+/// Something posted to everyone in the organisation. Admins post and take
+/// them down; `sticky` ones stay at the top.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Announcement {
+    pub id: String,
+    pub body: String,
+    pub sticky: bool,
+    /// `YYYY-MM-DD`, the last day it shows.
+    pub expires_on: Option<String>,
+    pub author: Option<Person>,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+/// A task on one of the dashboard's cards, from the viewer's side: their
+/// action, or whoever they're waiting on. Overdue and due-today are worked
+/// out by the server against the viewer's own timezone.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DashboardTask {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub project_name: Option<String>,
+    pub due_on: Option<String>,
+    pub is_owner: bool,
+    pub is_action_required: bool,
+    pub waiting_on: Option<Person>,
+    pub is_overdue: bool,
+    pub is_due_today: bool,
+}
+
+/// One of the organisation's most recently touched tasks; a comment counts.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct RecentTask {
+    pub id: String,
+    pub title: String,
+    pub status: String,
+    pub project_name: Option<String>,
+    pub owner: Option<Person>,
+    pub is_open: bool,
+    pub updated_at: Option<DateTime<Utc>>,
+}
+
+/// The organisation's front page, in one request. The task cards are the
+/// viewer's own (owned or asked to act); `recent` is everybody's.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Dashboard {
+    pub announcements: Vec<Announcement>,
+    /// Away now or in the next fortnight.
+    pub away: Vec<Absence>,
+    pub can_announce: bool,
+    pub critical: Vec<DashboardTask>,
+    pub urgent: Vec<DashboardTask>,
+    pub high: Vec<DashboardTask>,
+    pub due_soon: Vec<DashboardTask>,
+    /// Your own bookmarks; nobody else's dashboard shows them.
+    pub pinned: Vec<DashboardTask>,
+    pub recent: Vec<RecentTask>,
+}
+
+// ---------------------------------------------------------------- calendar
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CalendarTask {
+    pub id: String,
+    pub title: String,
+    /// `YYYY-MM-DD`.
+    pub due_on: String,
+    pub status: String,
+    pub priority: String,
+    pub project_name: Option<String>,
+}
+
+/// One of your own reminders; a standalone one has a `title` and no task.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CalendarReminder {
+    pub id: String,
+    pub remind_on: String,
+    pub note: Option<String>,
+    pub task_id: Option<String>,
+    pub task_title: Option<String>,
+    pub title: Option<String>,
+}
+
+impl CalendarReminder {
+    /// The note if there is one, else what it's about.
+    pub fn label(&self) -> String {
+        self.note
+            .clone()
+            .or_else(|| self.task_title.clone())
+            .or_else(|| self.title.clone())
+            .filter(|t| !t.trim().is_empty())
+            .unwrap_or_else(|| "Reminder".into())
+    }
+}
+
+/// A window of the calendar: every visible task due in it and who's away
+/// are the team's; the reminders are the viewer's alone.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CalendarWindow {
+    pub tasks: Vec<CalendarTask>,
+    pub reminders: Vec<CalendarReminder>,
+    pub away: Vec<Absence>,
 }
 
 // ------------------------------------------------------------------ search
@@ -472,6 +841,13 @@ mod tests {
             Some(LinkTarget::Book {
                 org_id: "o1".into(),
                 book_id: "b1".into()
+            })
+        );
+        assert_eq!(
+            parse_link("/orgs/o1/people/u1"),
+            Some(LinkTarget::Person {
+                org_id: "o1".into(),
+                user_id: "u1".into()
             })
         );
         assert_eq!(parse_link("/settings"), None);

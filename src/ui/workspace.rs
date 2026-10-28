@@ -33,14 +33,22 @@ use crate::api::models::Organisation;
 use crate::api::{ApiClient, ApiError, clamp_title};
 use crate::app_state::AppState;
 use crate::assets::Lucide;
+use crate::home::HomeEvent;
+use crate::home::calendar::CalendarView;
+use crate::home::dashboard::DashboardView;
 use crate::kb::article::{ArticleEvent, ArticleView};
 use crate::kb::panel::{KbPanel, KbPanelEvent};
 use crate::notes::editor::NoteEditor;
 use crate::notes::panel::{NotesPanel, PanelEvent};
 use crate::notes::store::{LoadState, NotesEvent, NotesStore};
+use crate::people::account::{AccountEvent, AccountView};
+use crate::people::panel::{PeoplePanel, PeoplePanelEvent};
+use crate::people::profile::{PersonView, PersonViewEvent};
 use crate::personal::inbox::{InboxEvent, InboxPanel};
 use crate::personal::reminders::{RemindersEvent, RemindersPanel};
 use crate::personal::sparks::{SparkView, SparkViewEvent, SparksEvent, SparksPanel};
+use crate::projects::panel::{ProjectsPanel, ProjectsPanelEvent};
+use crate::projects::view::{ProjectView, ProjectViewEvent};
 use crate::realtime::{LiveState, Nudges, Realtime};
 use crate::session::{Directory, OrgCtx, Session};
 use crate::store::profiles::Profile;
@@ -76,6 +84,8 @@ struct OrgModules {
     notes_store: Entity<NotesStore>,
     notes: Entity<NotesPanel>,
     tasks: Entity<TasksPanel>,
+    projects: Entity<ProjectsPanel>,
+    people: Entity<PeoplePanel>,
     planner: Entity<PlannerPanel>,
     kb: Entity<KbPanel>,
     _subscriptions: Vec<Subscription>,
@@ -93,6 +103,7 @@ struct Personal {
 #[derive(Clone)]
 enum PromptKind {
     NewTask,
+    NewProject,
     Spark,
     NewBook,
     NewArticle { book_id: String },
@@ -320,6 +331,16 @@ impl Workspace {
         })
         .detach();
         self.orgs = orgs;
+        let is_admin = self.is_admin();
+        let accounts: Vec<Entity<AccountView>> = self
+            .pane
+            .read(cx)
+            .items()
+            .filter_map(|item| item.to_any_view().downcast::<AccountView>().ok())
+            .collect();
+        for account in accounts {
+            account.update(cx, |a, cx| a.set_is_admin(is_admin, cx));
+        }
         let still_there = self
             .org
             .as_ref()
@@ -353,6 +374,8 @@ impl Workspace {
             cx.new(|cx| NotesStore::new(&self.profile.id, &org.id, client.clone(), cx));
         let notes = cx.new(|cx| NotesPanel::new(notes_store.clone(), window, cx));
         let tasks = cx.new(|cx| TasksPanel::new(ctx.clone(), window, cx));
+        let projects = cx.new(|cx| ProjectsPanel::new(ctx.clone(), window, cx));
+        let people = cx.new(|cx| PeoplePanel::new(ctx.clone(), window, cx));
         let planner = cx.new(|cx| PlannerPanel::new(ctx.clone(), cx));
         let kb = cx.new(|cx| KbPanel::new(ctx.clone(), cx));
         let subscriptions = vec![
@@ -367,6 +390,33 @@ impl Workspace {
                 |this, _, e: &TasksPanelEvent, window, cx| match e {
                     TasksPanelEvent::NewTask => this.show_prompt(PromptKind::NewTask, window, cx),
                     TasksPanelEvent::AuthFailed(e) => {
+                        cx.emit(WorkspaceEvent::AuthRequired(e.clone()))
+                    }
+                },
+            ),
+            cx.subscribe_in(&projects, window, |this, _, open: &Open, window, cx| {
+                this.open(open.clone(), window, cx)
+            }),
+            cx.subscribe_in(
+                &projects,
+                window,
+                |this, _, e: &ProjectsPanelEvent, window, cx| match e {
+                    ProjectsPanelEvent::NewProject => {
+                        this.show_prompt(PromptKind::NewProject, window, cx)
+                    }
+                    ProjectsPanelEvent::AuthFailed(e) => {
+                        cx.emit(WorkspaceEvent::AuthRequired(e.clone()))
+                    }
+                },
+            ),
+            cx.subscribe_in(&people, window, |this, _, open: &Open, window, cx| {
+                this.open(open.clone(), window, cx)
+            }),
+            cx.subscribe_in(
+                &people,
+                window,
+                |_, _, e: &PeoplePanelEvent, _, cx| match e {
+                    PeoplePanelEvent::AuthFailed(e) => {
                         cx.emit(WorkspaceEvent::AuthRequired(e.clone()))
                     }
                 },
@@ -401,6 +451,8 @@ impl Workspace {
             notes_store,
             notes,
             tasks,
+            projects,
+            people,
             planner,
             kb,
             _subscriptions: subscriptions,
@@ -420,10 +472,15 @@ impl Workspace {
         self.realtime.update(cx, |r, _| r.watch_board(Some(board)));
         self.org = Some(org);
         self.last_refresh = Instant::now();
+        // Nothing left open here last time: land on the front page, as the
+        // web app does.
+        let landing = tabs.items.is_empty();
         self.pending_restore = Some(tabs);
         self.restore_tabs(window, cx);
         if let Some(open) = self.pending_open.take() {
             self.open(open, window, cx);
+        } else if landing {
+            self.open(Open::Home, window, cx);
         }
         cx.notify();
     }
@@ -518,6 +575,10 @@ impl Workspace {
         if let Open::Task {
             org_id: Some(org_id),
             ..
+        }
+        | Open::Person {
+            org_id: Some(org_id),
+            ..
         } = &open
             && self.org.as_ref().map(|o| &o.id) != Some(org_id)
         {
@@ -542,7 +603,10 @@ impl Workspace {
         }
         let (preview, focus) = match &open {
             Open::Note { preview, focus, .. } => (*preview, *focus),
-            Open::Task { preview, .. } | Open::Article { preview, .. } => (*preview, !*preview),
+            Open::Task { preview, .. }
+            | Open::Article { preview, .. }
+            | Open::Project { preview, .. }
+            | Open::Person { preview, .. } => (*preview, !*preview),
             _ => (false, true),
         };
         if let Some(key) = key_for(&open)
@@ -560,6 +624,11 @@ impl Workspace {
             Open::Note { id, .. } => self.note_item(&id, window, cx),
             Open::Task { id, .. } => self.task_item(id, window, cx),
             Open::Article { id, .. } => self.article_item(id, window, cx),
+            Open::Project { id, .. } => self.project_item(id, window, cx),
+            Open::Person { id, .. } => self.person_item(id, window, cx),
+            Open::Account => Some(self.account_item(window, cx)),
+            Open::Home => self.home_item(window, cx),
+            Open::Calendar => self.calendar_item(window, cx),
             Open::Spark { id } => self.spark_item(&id, window, cx),
             Open::TaskTable { .. } | Open::Web(_) => None,
         };
@@ -703,6 +772,167 @@ impl Workspace {
         Some(Box::new(view))
     }
 
+    fn project_item(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Box<dyn ItemHandle>> {
+        let ctx = self.org_ctx()?;
+        let view = cx.new(|cx| ProjectView::new(ctx, id, window, cx));
+        self._subscriptions.push(cx.subscribe_in(
+            &view,
+            window,
+            |this, _, open: &Open, window, cx| this.open(open.clone(), window, cx),
+        ));
+        self._subscriptions.push(cx.subscribe_in(
+            &view,
+            window,
+            |this, _, e: &ProjectViewEvent, _, cx| match e {
+                ProjectViewEvent::Changed(project) => {
+                    if let Some(m) = &this.modules {
+                        m.projects
+                            .update(cx, |p, cx| p.project_changed(project, cx));
+                        // Its name is in every task picker.
+                        m.ctx.directory.update(cx, |d, cx| d.refresh(cx));
+                    }
+                }
+                ProjectViewEvent::AuthFailed(e) => cx.emit(WorkspaceEvent::AuthRequired(e.clone())),
+            },
+        ));
+        Some(Box::new(view))
+    }
+
+    fn person_item(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Box<dyn ItemHandle>> {
+        let ctx = self.org_ctx()?;
+        let view = cx.new(|cx| PersonView::new(ctx, id, window, cx));
+        self._subscriptions.push(cx.subscribe_in(
+            &view,
+            window,
+            |this, _, open: &Open, window, cx| this.open(open.clone(), window, cx),
+        ));
+        self._subscriptions.push(cx.subscribe_in(
+            &view,
+            window,
+            |_, _, e: &PersonViewEvent, _, cx| match e {
+                PersonViewEvent::AuthFailed(e) => cx.emit(WorkspaceEvent::AuthRequired(e.clone())),
+            },
+        ));
+        Some(Box::new(view))
+    }
+
+    fn home_item(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Box<dyn ItemHandle>> {
+        let ctx = self.org_ctx()?;
+        let view = cx.new(|cx| DashboardView::new(ctx, window, cx));
+        self.subscribe_home(&view, window, cx);
+        Some(Box::new(view))
+    }
+
+    fn calendar_item(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Box<dyn ItemHandle>> {
+        let ctx = self.org_ctx()?;
+        let view = cx.new(|cx| CalendarView::new(ctx, cx));
+        self.subscribe_home(&view, window, cx);
+        Some(Box::new(view))
+    }
+
+    fn subscribe_home<V: EventEmitter<Open> + EventEmitter<HomeEvent>>(
+        &mut self,
+        view: &Entity<V>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self._subscriptions.push(cx.subscribe_in(
+            view,
+            window,
+            |this, _, open: &Open, window, cx| this.open(open.clone(), window, cx),
+        ));
+        self._subscriptions.push(cx.subscribe_in(
+            view,
+            window,
+            |_, _, e: &HomeEvent, _, cx| match e {
+                HomeEvent::AuthFailed(e) => cx.emit(WorkspaceEvent::AuthRequired(e.clone())),
+            },
+        ));
+    }
+
+    /// The open tabs of one kind of view.
+    fn views<V: 'static>(&self, cx: &App) -> Vec<Entity<V>> {
+        self.pane
+            .read(cx)
+            .items()
+            .filter_map(|item| item.to_any_view().downcast::<V>().ok())
+            .collect()
+    }
+
+    /// The front page and the calendar show what tasks are doing.
+    fn reload_home(&self, cx: &mut Context<Self>) {
+        for view in self.views::<DashboardView>(cx) {
+            view.update(cx, |v, cx| v.reload(cx));
+        }
+        for view in self.views::<CalendarView>(cx) {
+            view.update(cx, |v, cx| v.reload(cx));
+        }
+    }
+
+    /// Whether the person administers any organisation here: the weekly
+    /// report goes only to them.
+    fn is_admin(&self) -> bool {
+        self.orgs
+            .iter()
+            .any(|o| o.role == "owner" || o.role == "admin")
+    }
+
+    fn account_item(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Box<dyn ItemHandle> {
+        let session = self.session.clone();
+        let is_admin = self.is_admin();
+        let view = cx.new(|cx| AccountView::new(session, is_admin, window, cx));
+        self._subscriptions.push(cx.subscribe_in(
+            &view,
+            window,
+            |this, _, e: &AccountEvent, _, cx| match e {
+                AccountEvent::MeChanged(me) => {
+                    let id = this.profile.id.clone();
+                    this.profile.display_name = me.display_name.clone();
+                    let snapshot = this.profile.clone();
+                    AppState::update(cx, |state, _| state.update_profile(&id, |p| *p = snapshot));
+                    if let Some(m) = &this.modules {
+                        m.ctx.directory.update(cx, |d, cx| d.refresh(cx));
+                    }
+                    cx.notify();
+                }
+                AccountEvent::AuthFailed(e) => cx.emit(WorkspaceEvent::AuthRequired(e.clone())),
+            },
+        ));
+        Box::new(view)
+    }
+
+    /// Open project tabs whose id passes `which`.
+    fn project_views(&self, which: impl Fn(&str) -> bool, cx: &App) -> Vec<Entity<ProjectView>> {
+        self.pane
+            .read(cx)
+            .items()
+            .filter(|item| {
+                item.item_key(cx)
+                    .strip_prefix("project:")
+                    .is_some_and(&which)
+            })
+            .filter_map(|item| item.to_any_view().downcast::<ProjectView>().ok())
+            .collect()
+    }
+
     fn spark_item(
         &mut self,
         id: &str,
@@ -752,6 +982,12 @@ impl Workspace {
                 "What needs doing?",
                 "⏎ creates it and opens it — fill in the rest there.".into(),
                 Icon::new(Lucide::SquareCheck),
+            ),
+            PromptKind::NewProject => (
+                format!("New project in {org}"),
+                "Project name",
+                "You'll own it, and nobody else can see it until you share it.".into(),
+                Icon::new(Lucide::FolderKanban),
             ),
             PromptKind::Spark => (
                 "Spark".into(),
@@ -806,6 +1042,28 @@ impl Workspace {
                 self.focus_active(window, cx);
             }
             PromptKind::NewTask => self.create_task(text, None, window, cx),
+            PromptKind::NewProject => {
+                let Some(ctx) = self.org_ctx() else { return };
+                self.run(
+                    window,
+                    cx,
+                    move |c: &ApiClient| c.create_project(ctx.org_id(), &text),
+                    |this, project, window, cx| {
+                        if let Some(m) = &this.modules {
+                            m.projects.update(cx, |p, cx| p.refresh(cx));
+                            m.ctx.directory.update(cx, |d, cx| d.refresh(cx));
+                        }
+                        this.open(
+                            Open::Project {
+                                id: project.id,
+                                preview: false,
+                            },
+                            window,
+                            cx,
+                        );
+                    },
+                );
+            }
             PromptKind::NewBook => {
                 let Some(ctx) = self.org_ctx() else { return };
                 self.run(
@@ -1047,6 +1305,8 @@ impl Workspace {
             m.ctx.directory.update(cx, |d, cx| d.refresh(cx));
             match self.module {
                 Module::Tasks => m.tasks.update(cx, |t, cx| t.refresh(cx)),
+                Module::Projects => m.projects.update(cx, |p, cx| p.refresh(cx)),
+                Module::People => m.people.update(cx, |p, cx| p.refresh(cx)),
                 Module::Planner => m.planner.update(cx, |p, cx| p.refresh(cx)),
                 Module::Knowledge => m.kb.update(cx, |k, cx| k.refresh(cx)),
                 _ => {}
@@ -1055,6 +1315,10 @@ impl Workspace {
         for table in self.task_tables(cx) {
             table.update(cx, |t, cx| t.refresh(cx));
         }
+        for view in self.project_views(|_| true, cx) {
+            view.update(cx, |v, cx| v.reload(window, cx));
+        }
+        self.reload_home(cx);
         self.personal.inbox.update(cx, |i, cx| i.refresh(cx));
         self.personal.timer.update(cx, |t, cx| t.refresh(cx));
         self.last_personal_refresh = Instant::now();
@@ -1089,6 +1353,9 @@ impl Workspace {
             return;
         }
         self.reload_task_tabs(|id| nudges.tasks.contains(id), window, cx);
+        for view in self.project_views(|id| nudges.projects.contains(id), cx) {
+            view.update(cx, |v, cx| v.reload_comments(window, cx));
+        }
         let here = self
             .org
             .as_ref()
@@ -1096,6 +1363,8 @@ impl Workspace {
         if here && let Some(m) = &self.modules {
             match self.module {
                 Module::Tasks => m.tasks.update(cx, |t, cx| t.refresh(cx)),
+                // Task counts.
+                Module::Projects => m.projects.update(cx, |p, cx| p.refresh(cx)),
                 Module::Planner => m.planner.update(cx, |p, cx| p.refresh(cx)),
                 _ => {}
             }
@@ -1104,6 +1373,7 @@ impl Workspace {
             for table in self.task_tables(cx) {
                 table.update(cx, |t, cx| t.refresh(cx));
             }
+            self.reload_home(cx);
         }
         // A check-in on the running task can't wait for the throttle.
         let timer_task = self
@@ -1172,6 +1442,8 @@ impl Workspace {
                 match module {
                     Module::Planner => m.planner.update(cx, |p, cx| p.refresh(cx)),
                     Module::Tasks => m.tasks.update(cx, |t, cx| t.refresh(cx)),
+                    Module::Projects => m.projects.update(cx, |p, cx| p.refresh(cx)),
+                    Module::People => m.people.update(cx, |p, cx| p.refresh(cx)),
                     _ => {}
                 }
             }
@@ -1204,8 +1476,13 @@ impl Workspace {
                 let note = self.active_id("note:", cx);
                 let task = self.active_id("task:", cx);
                 let article = self.active_id("article:", cx);
+                let project = self.active_id("project:", cx);
+                let person = self.active_id("person:", cx);
                 let spark = self.active_id("spark:", cx);
-                let thread = task.as_ref().map(|id| format!("task:{id}"));
+                let thread = task
+                    .as_ref()
+                    .map(|id| format!("task:{id}"))
+                    .or_else(|| project.as_ref().map(|id| format!("project:{id}")));
                 self.realtime.update(cx, |r, _| r.watch_thread(thread));
                 if let Some(m) = &self.modules {
                     m.notes.update(cx, |p, cx| p.set_active_note(note, cx));
@@ -1213,6 +1490,9 @@ impl Workspace {
                         .update(cx, |p, cx| p.set_active_task(task.clone(), cx));
                     m.planner.update(cx, |p, cx| p.set_active_task(task, cx));
                     m.kb.update(cx, |p, cx| p.set_active_article(article, cx));
+                    m.projects
+                        .update(cx, |p, cx| p.set_active_project(project, cx));
+                    m.people.update(cx, |p, cx| p.set_active_person(person, cx));
                 }
                 self.personal
                     .sparks
@@ -1224,6 +1504,7 @@ impl Workspace {
                 Module::Tasks | Module::Planner => {
                     self.show_prompt(PromptKind::NewTask, window, cx)
                 }
+                Module::Projects => self.show_prompt(PromptKind::NewProject, window, cx),
                 Module::Sparks => self.show_prompt(PromptKind::Spark, window, cx),
                 _ => self.create_note(None, window, cx),
             },
@@ -1357,6 +1638,28 @@ impl Workspace {
         self.open(Open::TaskTable { filters: None }, window, cx);
     }
 
+    fn action_open_home(&mut self, _: &OpenHome, window: &mut Window, cx: &mut Context<Self>) {
+        self.open(Open::Home, window, cx);
+    }
+
+    fn action_open_calendar(
+        &mut self,
+        _: &OpenCalendar,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open(Open::Calendar, window, cx);
+    }
+
+    fn action_open_account(
+        &mut self,
+        _: &OpenAccount,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open(Open::Account, window, cx);
+    }
+
     fn action_capture_spark(
         &mut self,
         _: &CaptureSpark,
@@ -1457,6 +1760,14 @@ impl Workspace {
             Module::Tasks => {
                 let tasks = m.tasks.clone();
                 tasks.update(cx, |t, cx| t.focus_filter(window, cx));
+            }
+            Module::Projects => {
+                let projects = m.projects.clone();
+                projects.update(cx, |p, cx| p.focus_filter(window, cx));
+            }
+            Module::People => {
+                let people = m.people.clone();
+                people.update(cx, |p, cx| p.focus_filter(window, cx));
             }
             Module::Sparks => {
                 let sparks = self.personal.sparks.clone();
@@ -1581,10 +1892,21 @@ impl Workspace {
                             }),
                     );
                 }
+                let account = this.clone();
                 let add = this.clone();
                 let sign_out = this.clone();
                 let remove = this.clone();
                 menu.separator()
+                    .item(
+                        PopupMenuItem::new("Your account…")
+                            .icon(Icon::new(Lucide::UserCog))
+                            .on_click(move |_, window, cx| {
+                                account
+                                    .update(cx, |this, cx| this.open(Open::Account, window, cx))
+                                    .ok();
+                            }),
+                    )
+                    .separator()
                     .item(
                         PopupMenuItem::new("Add a server…")
                             .icon(Icon::new(Lucide::UserPlus))
@@ -1705,6 +2027,35 @@ impl Workspace {
             .enumerate()
             .map(|(ix, m)| button(*m, Module::ORG.len() + ix, cx))
             .collect();
+        // The organisation's two pages: tabs, not lists, so they open
+        // rather than swap the sidebar.
+        let active_tab = self.active_key(cx);
+        let page = |id: &'static str, icon: Icon, tip: &'static str, open: Open| {
+            let selected = key_for(&open) == active_tab;
+            Button::new(id)
+                .icon(icon)
+                .ghost()
+                .small()
+                .selected(selected)
+                .tooltip(tip)
+                .on_click(
+                    cx.listener(move |this, _, window, cx| this.open(open.clone(), window, cx)),
+                )
+        };
+        let pages = [
+            page(
+                "page-home",
+                Icon::new(Lucide::House),
+                "Home (⌘⇧H)",
+                Open::Home,
+            ),
+            page(
+                "page-calendar",
+                Icon::new(IconName::Calendar),
+                "Calendar (⌘⇧C)",
+                Open::Calendar,
+            ),
+        ];
         v_flex()
             .w(px(44.))
             .h_full()
@@ -1715,6 +2066,10 @@ impl Workspace {
             .bg(theme.sidebar)
             .border_r_1()
             .border_color(theme.border)
+            .when(self.modules.is_some(), |this| {
+                this.children(pages)
+                    .child(div().w(px(20.)).h(px(1.)).my_1().bg(theme.border))
+            })
             .children(org_buttons)
             .child(div().w(px(20.)).h(px(1.)).my_1().bg(theme.border))
             .children(personal_buttons)
@@ -1734,6 +2089,8 @@ impl Workspace {
         match &self.modules {
             Some(m) => match self.module {
                 Module::Tasks => m.tasks.clone().into_any_element(),
+                Module::Projects => m.projects.clone().into_any_element(),
+                Module::People => m.people.clone().into_any_element(),
                 Module::Planner => m.planner.clone().into_any_element(),
                 Module::Knowledge => m.kb.clone().into_any_element(),
                 _ => m.notes.clone().into_any_element(),
@@ -1936,6 +2293,9 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::action_capture_spark))
             .on_action(cx.listener(Self::action_search))
             .on_action(cx.listener(Self::action_show_module))
+            .on_action(cx.listener(Self::action_open_account))
+            .on_action(cx.listener(Self::action_open_home))
+            .on_action(cx.listener(Self::action_open_calendar))
             .on_action(cx.listener(Self::action_close_tab))
             .on_action(cx.listener(Self::action_next_tab))
             .on_action(cx.listener(Self::action_prev_tab))

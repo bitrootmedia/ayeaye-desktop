@@ -7,6 +7,8 @@ use crate::assets::Lucide;
 pub enum Module {
     Notes,
     Tasks,
+    Projects,
+    People,
     Planner,
     Knowledge,
     Sparks,
@@ -18,6 +20,8 @@ impl Module {
     pub const ORG: &'static [Module] = &[
         Module::Notes,
         Module::Tasks,
+        Module::Projects,
+        Module::People,
         Module::Planner,
         Module::Knowledge,
     ];
@@ -31,6 +35,8 @@ impl Module {
         match self {
             Module::Notes => "Notes",
             Module::Tasks => "Tasks",
+            Module::Projects => "Projects",
+            Module::People => "People",
             Module::Planner => "My planner",
             Module::Knowledge => "Knowledge base",
             Module::Sparks => "Sparks",
@@ -43,6 +49,8 @@ impl Module {
         match self {
             Module::Notes => Lucide::NotebookPen,
             Module::Tasks => Lucide::ListTodo,
+            Module::Projects => Lucide::FolderKanban,
+            Module::People => Lucide::Users,
             Module::Planner => Lucide::CalendarDays,
             Module::Knowledge => Lucide::Library,
             Module::Sparks => Lucide::Lightbulb,
@@ -55,6 +63,8 @@ impl Module {
         match self {
             Module::Notes => "notes",
             Module::Tasks => "tasks",
+            Module::Projects => "projects",
+            Module::People => "people",
             Module::Planner => "planner",
             Module::Knowledge => "kb",
             Module::Sparks => "sparks",

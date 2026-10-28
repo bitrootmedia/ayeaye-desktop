@@ -11,9 +11,9 @@
 //!
 //! * the *board* socket watches `org:<id>` — every task change in the
 //!   organisation, which keeps the lists and any open task tab current;
-//! * the *thread* socket watches `task:<id>` for the task in the front tab,
-//!   because a comment only goes to people with a stake in the task and to
-//!   whoever has that task open — not to the organisation.
+//! * the *thread* socket watches `task:<id>` (or `project:<id>`) for the
+//!   task or project in the front tab, because a comment only goes to people
+//!   with a stake in it and to whoever has it open — not to the organisation.
 //!
 //! Both also receive what's addressed to the person (comments where they
 //! have a stake, their own planner), so nothing needs a third.
@@ -45,6 +45,8 @@ const COALESCE: Duration = Duration::from_millis(1500);
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Nudges {
     pub tasks: HashSet<String>,
+    /// Projects with a new comment.
+    pub projects: HashSet<String>,
     pub orgs: HashSet<String>,
     pub planner: bool,
     pub messages: bool,
@@ -60,10 +62,12 @@ impl Nudges {
             Some("planner") => self.planner = true,
             Some("message") => {
                 self.messages = true;
-                if event["anchor"]["kind"] == "task"
-                    && let Some(id) = text(&event["anchor"]["id"])
-                {
-                    self.tasks.insert(id);
+                if let Some(id) = text(&event["anchor"]["id"]) {
+                    match event["anchor"]["kind"].as_str() {
+                        Some("task") => _ = self.tasks.insert(id),
+                        Some("project") => _ = self.projects.insert(id),
+                        _ => {}
+                    }
                 }
             }
             _ => {}
@@ -357,5 +361,6 @@ mod tests {
         let mut project = Nudges::default();
         project.absorb(&json!({"type": "message", "anchor": {"kind": "project", "id": "p"}}));
         assert!(project.tasks.is_empty() && project.messages);
+        assert!(project.projects.contains("p"));
     }
 }

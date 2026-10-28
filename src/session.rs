@@ -81,9 +81,9 @@ impl Directory {
         let org_id = self.org_id.clone();
         self._task = Some(cx.spawn(async move |this, cx| {
             let (projects, members) = cx
-                .background_spawn(
-                    async move { (client.projects(&org_id), client.members(&org_id)) },
-                )
+                .background_spawn(async move {
+                    (client.projects(&org_id, false), client.members(&org_id))
+                })
                 .await;
             this.update(cx, |this, cx| {
                 if let Ok(mut projects) = projects {

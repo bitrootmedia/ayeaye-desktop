@@ -1,6 +1,7 @@
-//! The endpoints behind tasks, the knowledge base, sparks, reminders, the
-//! inbox, the timer, the planner and search. One method per call, a path and
-//! a decode: filtering, sorting and access are all the server's job.
+//! The endpoints behind tasks, projects, the knowledge base, sparks,
+//! reminders, the inbox, the timer, the planner, search, people, the
+//! dashboard, the calendar and the account. One method per call, a path
+//! and a decode: filtering, sorting and access are all the server's job.
 
 use serde_json::{Value, json};
 
@@ -69,8 +70,56 @@ fn encode(value: &str) -> String {
 impl ApiClient {
     // ------------------------------------------------------------ structure
 
-    pub fn projects(&self, org_id: &str) -> ApiResult<Vec<Project>> {
-        self.get(&format!("{}/projects", org(org_id)))
+    /// Only what the caller can see: owned, shared with them or a team of
+    /// theirs, or everything for an organisation admin.
+    pub fn projects(&self, org_id: &str, include_archived: bool) -> ApiResult<Vec<Project>> {
+        self.get(&format!(
+            "{}/projects?include_archived={include_archived}",
+            org(org_id)
+        ))
+    }
+
+    pub fn project(&self, org_id: &str, project_id: &str) -> ApiResult<Project> {
+        self.get(&format!("{}/projects/{project_id}", org(org_id)))
+    }
+
+    /// The caller owns it, and nobody else can see it until it's shared.
+    pub fn create_project(&self, org_id: &str, name: &str) -> ApiResult<Project> {
+        self.post(
+            &format!("{}/projects", org(org_id)),
+            &json!({ "name": name }),
+        )
+    }
+
+    /// `project_group_id: null` moves it out of every group; absent leaves
+    /// the group alone.
+    pub fn update_project(
+        &self,
+        org_id: &str,
+        project_id: &str,
+        fields: Value,
+    ) -> ApiResult<Project> {
+        self.patch(&format!("{}/projects/{project_id}", org(org_id)), &fields)
+    }
+
+    pub fn project_groups(&self, org_id: &str) -> ApiResult<Vec<ProjectGroup>> {
+        self.get(&format!("{}/project-groups", org(org_id)))
+    }
+
+    pub fn project_comments(&self, org_id: &str, project_id: &str) -> ApiResult<Thread> {
+        self.get(&format!("{}/projects/{project_id}/comments", org(org_id)))
+    }
+
+    pub fn post_project_comment(
+        &self,
+        org_id: &str,
+        project_id: &str,
+        body: &str,
+    ) -> ApiResult<Message> {
+        self.post(
+            &format!("{}/projects/{project_id}/comments", org(org_id)),
+            &json!({ "body": body }),
+        )
     }
 
     pub fn members(&self, org_id: &str) -> ApiResult<Vec<Member>> {
@@ -473,6 +522,265 @@ impl ApiClient {
 
     pub fn revoke_token(&self, token_id: &str) -> ApiResult<()> {
         self.delete(&format!("/api/me/tokens/{token_id}"))
+    }
+
+    pub fn access_tokens(&self) -> ApiResult<Vec<AccessToken>> {
+        self.get("/api/me/tokens")
+    }
+
+    // --------------------------------------------------------------- people
+
+    /// A colleague's page: their hours, whether they're away, and what of
+    /// theirs the caller's own task access reaches.
+    pub fn member_profile(&self, org_id: &str, user_id: &str) -> ApiResult<MemberProfile> {
+        self.get(&format!("{}/members/{user_id}/profile", org(org_id)))
+    }
+
+    /// The same page put together from older endpoints, for a server that
+    /// doesn't have `/profile` yet: who they are, their hours, whether
+    /// they're away, and the tasks they own that the caller can see. No
+    /// status line and no timer — those exist only on `/profile`. `None`
+    /// when they aren't a member here.
+    pub fn assembled_profile(
+        &self,
+        org_id: &str,
+        user_id: &str,
+    ) -> ApiResult<Option<MemberProfile>> {
+        let members = self.members(org_id)?;
+        let Some(member) = members
+            .into_iter()
+            .find(|m| m.user_id.as_deref() == Some(user_id))
+        else {
+            return Ok(None);
+        };
+        let hours = self
+            .member_working_hours(org_id, user_id)
+            .unwrap_or_default();
+        let away = self
+            .organisation_absences(org_id)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|a| a.person.as_ref().is_some_and(|p| p.id == user_id))
+            .collect();
+        let owned = |closed: bool| TaskQuery {
+            owner_user_id: Some(user_id.to_owned()),
+            include_closed: closed,
+            sort: Some("updated_at".into()),
+            descending: true,
+            limit: 10,
+            ..Default::default()
+        };
+        let (open, open_total) = self.tasks_counted(org_id, &owned(false))?;
+        let closed = self.tasks(org_id, &owned(true)).unwrap_or_default();
+        let as_profile = |t: Task| ProfileTask {
+            is_owner: true,
+            is_action_required: t.action_required.as_ref().is_some_and(|p| p.id == user_id),
+            closed_at: (!t.is_open).then_some(t.updated_at).flatten(),
+            id: t.id,
+            title: t.title,
+            status: t.status,
+            priority: t.priority,
+            project_name: t.project_name,
+            due_on: t.due_on,
+            is_open: t.is_open,
+            updated_at: t.updated_at,
+        };
+        Ok(Some(MemberProfile {
+            id: user_id.to_owned(),
+            email: member.email.clone().unwrap_or_default(),
+            display_name: member.display_name.clone(),
+            role: member.role.clone(),
+            joined_at: None,
+            timezone: hours.timezone,
+            status_message: None,
+            working_hours: hours.cells,
+            away,
+            working_on: None,
+            open_tasks: open.into_iter().map(as_profile).collect(),
+            open_total: open_total as i64,
+            recently_closed: closed
+                .into_iter()
+                .filter(|t| !t.is_open)
+                .take(5)
+                .map(as_profile)
+                .collect(),
+        }))
+    }
+
+    /// `user_id` is the person's own id, not their membership's.
+    pub fn member_working_hours(&self, org_id: &str, user_id: &str) -> ApiResult<WorkingHours> {
+        self.get(&format!("{}/members/{user_id}/working-hours", org(org_id)))
+    }
+
+    /// Who in the organisation is away now or in the next fortnight — the
+    /// dashboard's card, which is the only place the server lists it.
+    pub fn organisation_absences(&self, org_id: &str) -> ApiResult<Vec<Absence>> {
+        Ok(self.dashboard(org_id)?.away)
+    }
+
+    // ----------------------------------------------------- home and calendar
+
+    pub fn dashboard(&self, org_id: &str) -> ApiResult<Dashboard> {
+        self.get(&format!("{}/dashboard", org(org_id)))
+    }
+
+    /// Admins only; anyone else gets a 403.
+    pub fn post_announcement(
+        &self,
+        org_id: &str,
+        body: &str,
+        sticky: bool,
+        expires_on: Option<&str>,
+    ) -> ApiResult<Announcement> {
+        self.post(
+            &format!("{}/announcements", org(org_id)),
+            &json!({ "body": body, "sticky": sticky, "expires_on": expires_on }),
+        )
+    }
+
+    pub fn delete_announcement(&self, org_id: &str, announcement_id: &str) -> ApiResult<()> {
+        self.delete(&format!("{}/announcements/{announcement_id}", org(org_id)))
+    }
+
+    /// Everything dated `start` to `end`, both included, `YYYY-MM-DD`. The
+    /// server refuses a window over 42 days — a six-week month grid.
+    pub fn calendar(&self, org_id: &str, start: &str, end: &str) -> ApiResult<CalendarWindow> {
+        self.get(&format!(
+            "{}/calendar{}",
+            org(org_id),
+            query(&[("start", Some(start.into())), ("end", Some(end.into()))])
+        ))
+    }
+
+    // -------------------------------------------------------------- account
+
+    /// Only the fields given; the server leaves the rest alone.
+    pub fn update_me(&self, fields: Value) -> ApiResult<Me> {
+        self.patch("/api/me", &fields)
+    }
+
+    pub fn change_password(&self, current: &str, new: &str) -> ApiResult<()> {
+        self.post_empty(
+            "/api/me/password",
+            &json!({ "current_password": current, "new_password": new }),
+        )
+    }
+
+    pub fn my_working_hours(&self) -> ApiResult<WorkingHours> {
+        self.get("/api/me/working-hours")
+    }
+
+    /// Marking a marked hour, or clearing a clear one, is not an error.
+    pub fn set_working_hour(&self, cell: WorkingHourCell, on: bool) -> ApiResult<()> {
+        let path = format!("/api/me/working-hours/{}/{}", cell.weekday, cell.hour);
+        if on {
+            self.put_empty(&path, &json!({}))
+        } else {
+            self.delete(&path)
+        }
+    }
+
+    pub fn my_absences(&self) -> ApiResult<Vec<Absence>> {
+        self.get("/api/me/out-of-office")
+    }
+
+    pub fn add_absence(
+        &self,
+        starts_on: &str,
+        ends_on: &str,
+        note: Option<&str>,
+    ) -> ApiResult<Absence> {
+        self.post(
+            "/api/me/out-of-office",
+            &json!({ "starts_on": starts_on, "ends_on": ends_on, "note": note }),
+        )
+    }
+
+    pub fn delete_absence(&self, absence_id: &str) -> ApiResult<()> {
+        self.delete(&format!("/api/me/out-of-office/{absence_id}"))
+    }
+
+    pub fn mfa_status(&self) -> ApiResult<MfaStatus> {
+        self.get("/api/me/mfa/status")
+    }
+
+    pub fn new_totp_device(&self) -> ApiResult<TotpDevice> {
+        self.post("/api/me/mfa/totp", &json!({}))
+    }
+
+    /// Persists the device once a code from it checks out.
+    pub fn verify_totp(&self, secret: &str, code: &str) -> ApiResult<()> {
+        self.post_empty(
+            "/api/me/mfa/totp/verify",
+            &json!({ "secret": secret, "code": code }),
+        )
+    }
+
+    /// Also clears the backup codes.
+    pub fn remove_totp(&self) -> ApiResult<()> {
+        self.delete("/api/me/mfa/totp")
+    }
+
+    /// Ten new codes; the old ones stop working.
+    pub fn new_backup_codes(&self) -> ApiResult<BackupCodes> {
+        self.post("/api/me/mfa/backup-codes", &json!({}))
+    }
+
+    pub fn oauth_grants(&self) -> ApiResult<Vec<OAuthGrant>> {
+        self.get("/api/me/oauth-grants")
+    }
+
+    pub fn revoke_oauth_grant(&self, grant_id: &str) -> ApiResult<()> {
+        self.delete(&format!("/api/me/oauth-grants/{grant_id}"))
+    }
+
+    pub fn notification_channels(&self) -> ApiResult<Vec<NotificationChannel>> {
+        self.get("/api/me/notification-channels")
+    }
+
+    pub fn set_channel_kinds(
+        &self,
+        channel_id: &str,
+        kinds: &[String],
+    ) -> ApiResult<NotificationChannel> {
+        self.patch(
+            &format!("/api/me/notification-channels/{channel_id}"),
+            &json!({ "enabled_kinds": kinds }),
+        )
+    }
+
+    /// Unlinks Telegram or removes a webhook; email can't be removed.
+    pub fn delete_channel(&self, channel_id: &str) -> ApiResult<()> {
+        self.delete(&format!("/api/me/notification-channels/{channel_id}"))
+    }
+
+    pub fn add_webhook(&self, url: &str, label: &str) -> ApiResult<WebhookCreated> {
+        self.post(
+            "/api/me/notification-channels/webhook",
+            &json!({ "url": url, "label": label }),
+        )
+    }
+
+    /// A t.me link with a one-time code; tapping Start there finishes it.
+    pub fn telegram_link(&self) -> ApiResult<String> {
+        let link: Value = self.post(
+            "/api/me/notification-channels/telegram/link-start",
+            &json!({}),
+        )?;
+        Ok(link["deep_link"].as_str().unwrap_or_default().to_owned())
+    }
+
+    pub fn organisation_emails(&self) -> ApiResult<Vec<OrganisationEmail>> {
+        self.get("/api/me/notification-emails")
+    }
+
+    /// Blank goes back to the account address; anything else waits for the
+    /// link sent to it.
+    pub fn set_organisation_email(&self, org_id: &str, email: &str) -> ApiResult<()> {
+        self.put_empty(
+            &format!("/api/me/notification-emails/{org_id}"),
+            &json!({ "email": email }),
+        )
     }
 }
 

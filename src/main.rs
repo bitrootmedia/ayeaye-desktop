@@ -8,9 +8,12 @@ mod app_state;
 mod assets;
 #[cfg(feature = "devtools")]
 mod devtools;
+mod home;
 mod kb;
 mod notes;
+mod people;
 mod personal;
+mod projects;
 mod realtime;
 mod session;
 mod store;

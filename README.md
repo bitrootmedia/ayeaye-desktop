@@ -4,7 +4,18 @@ A native desktop client for [ayeaye](../ayeaye), in Rust on
 [GPUI](https://github.com/zed-industries/zed) — Zed's own UI framework — through
 [GPUI Kit](https://gpui-kit.com), with Zed's tabs, quick open and feel.
 
-The rail at the left holds the modules. The organisation's:
+At the top of the rail are the organisation's two pages, each opened as a
+tab:
+
+- **Home** (⌘⇧H) — the web app's dashboard: announcements (admins post and
+  take them down), who's away now and in the next fortnight, then your own
+  critical, urgent, high-priority, due-soon and pinned tasks, each marked
+  "Your action" or who you're waiting on, and the organisation's recent
+  activity. It is where an organisation opens when nothing was left open.
+- **Calendar** (⌘⇧C) — a six-week month grid of every visible task's due
+  date, who's away, and your own reminders; click a day for all of it.
+
+Below them are the modules. The organisation's:
 
 - **Notes** — the notepad that replaces a folder of loose text files
 - **Tasks** — Waiting on me, Mine, Triage, All open, by project; a task opens
@@ -13,6 +24,18 @@ The rail at the left holds the modules. The organisation's:
   web app's table: project, status, priority, owner, action required, due,
   created and updated columns, sorted by the server on any of them, filtered
   on all of them plus tag and closed, paged with the total always shown
+- **Projects** — what you own or has been shared with you, by group, with
+  open and important counts; a project opens in a tab with its name,
+  description and group (editable with write access), archive/restore for the
+  owner, its open tasks, and its comments. Sharing, export, handing over and
+  deleting stay in the web app, a button away
+- **People** — everyone in the organisation with their own time of day and
+  whether it's inside their working hours or they're away (a green dot when
+  it's a good time). A person opens in a tab: right now (their clock, hours,
+  out-of-office, status line), the timer they're running, their open and
+  recently closed tasks as far as your access reaches, and their week in
+  their timezone and yours. Against a server without the `/profile` endpoint
+  the page is assembled from older ones, without status line or timer
 - **My planner** — Today, Tomorrow, This week, Next week, Someday
 - **Knowledge base** — books and articles; read rendered, edit as markdown,
   publish, attach files
@@ -26,6 +49,13 @@ and the person's own, which ignore the organisation:
 - **Sparks** — quick capture (⌘J from anywhere), turn one into a task
 - **Reminders** — due and upcoming across every organisation, tick or snooze
 - **Inbox** — notifications, with the unread count on the rail
+
+**Your account** (⌘, or the profile menu) is the web app's Account page:
+display name and status, daily summary and weekly report, timer check-ins,
+out of office, working hours (click or drag across the grid), password,
+two-factor (QR set-up, backup codes), access tokens and connected apps,
+notification channels (Telegram, webhooks), which notification goes where,
+and email per organisation.
 
 Plus the running timer in the status bar (with the server's "still working on
 this?" check-in), ⌘⇧F search across the organisation, and live updates: a
@@ -76,7 +106,9 @@ Type `http://localhost` as the server. `http://` is warned about, never blocked.
 | ⌘⌥T | All tasks as a table; ↑/↓ move, Return opens, right-click for the link |
 | ⌘J | Capture a spark |
 | ⌘⇧F | Search the organisation |
-| ⌘⌥1–7 | Notes, Tasks, Planner, Knowledge base, Sparks, Reminders, Inbox |
+| ⌘⌥1–9 | Notes, Tasks, Projects, People, Planner, Knowledge base, Sparks, Reminders, Inbox |
+| ⌘, | Your account |
+| ⌘⇧H / ⌘⇧C | Home / Calendar |
 | ⌘P / ⌘K | Find a note; Return on no match creates one with that title |
 | ⌘⇧E | Focus the sidebar's filter (in Notes, ↑/↓ preview as you go) |
 | ⌘W, ⌘⇧T | Close tab, reopen the last closed one |

@@ -20,6 +20,8 @@ ureq = { version = "3", features = ["json"] }
 keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service"] }
 dirs = "6"
 iana-time-zone = "0.1"
+# Their local time on a colleague's page: IANA zones, from the system database.
+jiff = "0.2"
 log = "0.4"
 env_logger = "0.11"
 # Only to switch on render-to-image for devtools; the app uses GPUI through gpui-kit.

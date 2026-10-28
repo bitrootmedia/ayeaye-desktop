@@ -111,11 +111,10 @@ impl SearchView {
                 id: hit.id.clone(),
                 preview: false,
             },
-            "project" => Open::Web(
-                self.ctx
-                    .session
-                    .web_url(&format!("/orgs/{org}/projects/{}", hit.id)),
-            ),
+            "project" => Open::Project {
+                id: hit.id.clone(),
+                preview: false,
+            },
             "book" => Open::Web(
                 self.ctx
                     .session

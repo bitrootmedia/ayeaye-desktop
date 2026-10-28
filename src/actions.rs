@@ -28,6 +28,9 @@ gpui_kit::actions!(
         Cancel,
         OpenTaskTable,
         OpenSelected,
+        OpenAccount,
+        OpenHome,
+        OpenCalendar,
     ]
 );
 
@@ -35,7 +38,7 @@ gpui_kit::actions!(
 #[action(namespace = ayeaye, no_json)]
 pub struct ActivateTab(pub usize);
 
-/// ⌘⌥1…7: jump to a module on the rail.
+/// ⌘⌥1…9: jump to a module on the rail.
 #[derive(Clone, Debug, PartialEq, gpui_kit::Action)]
 #[action(namespace = ayeaye, no_json)]
 pub struct ShowModule(pub usize);
@@ -63,6 +66,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-backspace", DeleteNote, ws),
         KeyBinding::new("secondary-r", Refresh, ws),
         KeyBinding::new("secondary-alt-t", OpenTaskTable, ws),
+        KeyBinding::new("secondary-,", OpenAccount, ws),
+        KeyBinding::new("secondary-shift-h", OpenHome, ws),
+        KeyBinding::new("secondary-shift-c", OpenCalendar, ws),
         KeyBinding::new("secondary-q", Quit, None),
         // Lists with a filter field: the arrows move the selection, not the
         // caret. "X > Input" outranks the Input's own up/down.
@@ -86,6 +92,13 @@ pub fn bind_keys(cx: &mut App) {
             ws,
         ));
     }
+    for n in 1..=9 {
+        bindings.push(KeyBinding::new(
+            &format!("secondary-alt-{n}"),
+            ShowModule(n - 1),
+            ws,
+        ));
+    }
     cx.bind_keys(bindings);
 }
 
@@ -93,6 +106,8 @@ pub fn set_menus(cx: &mut App) {
     cx.set_menus(vec![
         Menu::new("Ayeaye").items([
             MenuItem::action("About Ayeaye", About),
+            MenuItem::separator(),
+            MenuItem::action("Your Account…", OpenAccount),
             MenuItem::separator(),
             MenuItem::action("Quit Ayeaye", Quit),
         ]),
@@ -119,13 +134,18 @@ pub fn set_menus(cx: &mut App) {
             MenuItem::os_action("Select All", input::SelectAll, OsAction::SelectAll),
         ]),
         Menu::new("View").items([
+            MenuItem::action("Home", OpenHome),
+            MenuItem::action("Calendar", OpenCalendar),
+            MenuItem::separator(),
             MenuItem::action("Notes", ShowModule(0)),
             MenuItem::action("Tasks", ShowModule(1)),
-            MenuItem::action("My Planner", ShowModule(2)),
-            MenuItem::action("Knowledge Base", ShowModule(3)),
-            MenuItem::action("Sparks", ShowModule(4)),
-            MenuItem::action("Reminders", ShowModule(5)),
-            MenuItem::action("Inbox", ShowModule(6)),
+            MenuItem::action("Projects", ShowModule(2)),
+            MenuItem::action("People", ShowModule(3)),
+            MenuItem::action("My Planner", ShowModule(4)),
+            MenuItem::action("Knowledge Base", ShowModule(5)),
+            MenuItem::action("Sparks", ShowModule(6)),
+            MenuItem::action("Reminders", ShowModule(7)),
+            MenuItem::action("Inbox", ShowModule(8)),
             MenuItem::separator(),
             MenuItem::action("All Tasks as a Table", OpenTaskTable),
             MenuItem::separator(),

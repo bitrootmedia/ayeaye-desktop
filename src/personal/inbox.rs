@@ -109,6 +109,11 @@ impl InboxPanel {
                 org_id: Some(org_id),
                 preview: false,
             },
+            Some(LinkTarget::Person { org_id, user_id }) => Open::Person {
+                id: user_id,
+                org_id: Some(org_id),
+                preview: false,
+            },
             _ => Open::Web(format!("{}{}", self.base_url, path)),
         };
         cx.emit(open);

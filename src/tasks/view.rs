@@ -1262,7 +1262,7 @@ impl TaskView {
 
 /// One comment: who and when over the body, in a bubble. Your own lean
 /// blue so you can find your place in a long thread.
-fn render_message(m: &Message, theme: &gpui_kit::component::Theme) -> AnyElement {
+pub(crate) fn render_message(m: &Message, theme: &gpui_kit::component::Theme) -> AnyElement {
     let name = m
         .author
         .as_ref()
@@ -1319,7 +1319,7 @@ fn render_message(m: &Message, theme: &gpui_kit::component::Theme) -> AnyElement
 }
 
 /// A section of the task's page: a bordered panel.
-fn card(theme: &gpui_kit::component::Theme) -> Div {
+pub(crate) fn card(theme: &gpui_kit::component::Theme) -> Div {
     v_flex()
         .gap_3()
         .p_4()
@@ -1329,7 +1329,7 @@ fn card(theme: &gpui_kit::component::Theme) -> Div {
         .bg(theme.background)
 }
 
-fn section_title(
+pub(crate) fn section_title(
     label: &'static str,
     icon: crate::assets::Lucide,
     color: Hsla,
