@@ -109,6 +109,11 @@ impl InboxPanel {
                 org_id: Some(org_id),
                 preview: false,
             },
+            Some(LinkTarget::Chat { org_id, chat_id }) => Open::Chat {
+                id: chat_id,
+                org_id: Some(org_id),
+                preview: false,
+            },
             Some(LinkTarget::Person { org_id, user_id }) => Open::Person {
                 id: user_id,
                 org_id: Some(org_id),

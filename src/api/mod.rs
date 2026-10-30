@@ -360,6 +360,130 @@ mod live {
         client.delete_article(&org.id, &article.id).unwrap();
     }
 
+    /// Chats with one account: saved messages, a group, a task's thread
+    /// seen as a chat — sending, quoting, editing, removing, reading,
+    /// pinning, and a file posted into one.
+    #[::core::prelude::v1::test]
+    #[ignore]
+    fn live_chats() {
+        let client = ApiClient::new(env("AYEAYE_TEST_SERVER"), Default::default(), |_| {});
+        client
+            .sign_in(&env("AYEAYE_TEST_EMAIL"), &env("AYEAYE_TEST_PASSWORD"))
+            .unwrap();
+        let me = client.me().unwrap();
+        let org = client.organisations().unwrap().remove(0);
+
+        let saved = client.open_direct(&org.id, &me.id).unwrap();
+        assert_eq!(
+            (saved.kind.as_str(), saved.title.as_str()),
+            ("direct", "Saved messages")
+        );
+        assert_eq!(client.open_direct(&org.id, &me.id).unwrap().id, saved.id);
+        let first = client
+            .send_chat_message(&org.id, &saved.id, "desktop chat one", &[], None)
+            .unwrap();
+        let reply = client
+            .send_chat_message(&org.id, &saved.id, "desktop chat two", &[], Some(&first.id))
+            .unwrap();
+        assert_eq!(
+            reply.reply_to.as_ref().map(|r| r.body.as_str()),
+            Some("desktop chat one")
+        );
+        let page = client.chat_messages(&org.id, &saved.id, None, 1).unwrap();
+        assert!(page.has_more && page.messages[0].id == reply.id);
+        let older = client
+            .chat_messages(&org.id, &saved.id, Some(&reply.id), 1)
+            .unwrap();
+        assert_eq!(older.messages[0].id, first.id);
+        assert_eq!(
+            client
+                .edit_message(&org.id, &first.id, "desktop chat one, edited")
+                .unwrap()
+                .body,
+            "desktop chat one, edited"
+        );
+        client.delete_message(&org.id, &first.id).unwrap();
+        client.mark_chat_read(&org.id, &saved.id, None).unwrap();
+
+        let ticket = client
+            .stage_chat_attachment(&org.id, &saved.id, "note.txt", "text/plain")
+            .unwrap();
+        client
+            .put_to_storage(&ticket.upload_url, &ticket.content_type, b"hello")
+            .unwrap();
+        client
+            .confirm_attachment(&org.id, &ticket.attachment.id)
+            .unwrap();
+        let with_file = client
+            .send_chat_message(
+                &org.id,
+                &saved.id,
+                "",
+                &[ticket.attachment.id.clone()],
+                None,
+            )
+            .unwrap();
+        // Only a file, no words: allowed exactly because something's attached.
+        assert_eq!(with_file.attachments.len(), 1);
+        assert!(with_file.body.is_empty());
+
+        client
+            .set_chat_state(&org.id, &saved.id, serde_json::json!({"pinned": true}))
+            .unwrap();
+        let (list, total) = client.chats(&org.id, "all", "", 50, 0).unwrap();
+        assert!(total >= list.len() && list[0].pinned);
+        let found = list.iter().find(|c| c.id == saved.id).unwrap();
+        assert_eq!(found.last_message.as_ref().map(|m| m.attachments), Some(1));
+        client
+            .set_chat_state(&org.id, &saved.id, serde_json::json!({"pinned": false}))
+            .unwrap();
+        let (hits, _) = client
+            .chats(&org.id, "all", "desktop chat two", 50, 0)
+            .unwrap();
+        assert!(hits.iter().any(|c| c.id == saved.id));
+        let _ = client.chats_unread(&org.id).unwrap();
+
+        let group = client
+            .create_group(&org.id, "  desktop live group  ", &[])
+            .unwrap();
+        assert_eq!(group.title, "desktop live group");
+        assert_eq!(
+            client
+                .rename_chat(&org.id, &group.id, "desktop group, renamed")
+                .unwrap()
+                .title,
+            "desktop group, renamed"
+        );
+        client
+            .send_chat_message(&org.id, &group.id, "hello group", &[], None)
+            .unwrap();
+        client
+            .remove_chat_member(&org.id, &group.id, &me.id)
+            .unwrap();
+        assert!(matches!(
+            client.chat(&org.id, &group.id),
+            Err(ApiError::NotFound(_))
+        ));
+
+        let task = client
+            .create_task(&org.id, serde_json::json!({"title": "desktop chat task"}))
+            .unwrap();
+        let thread = client.task_chat(&org.id, &task.id).unwrap();
+        assert_eq!(thread.kind, "task");
+        assert_eq!(
+            thread.task.as_ref().map(|t| t.id.as_str()),
+            Some(task.id.as_str())
+        );
+        client
+            .send_chat_message(&org.id, &thread.id, "from chats", &[], None)
+            .unwrap();
+        assert_eq!(
+            client.comments(&org.id, &task.id).unwrap().messages[0].body,
+            "from chats"
+        );
+        client.set_task_closed(&org.id, &task.id, true).unwrap();
+    }
+
     /// The socket: a minted read token gets in, a task change and a comment
     /// arrive as content-free nudges, and a revoked token is refused.
     #[::core::prelude::v1::test]
@@ -418,7 +542,11 @@ mod live {
         client
             .post_comment(&org.id, &task.id, "socket hello")
             .unwrap();
-        let signal = wait_for(&|s| matches!(s, Signal::Event(e) if e["type"] == "message"));
+        // Another live test may be talking in the same organisation: wait
+        // for this task's message, not just any.
+        let signal = wait_for(
+            &|s| matches!(s, Signal::Event(e) if e["type"] == "message" && e["anchor"]["id"] == id.as_str()),
+        );
         let Signal::Event(event) = signal else {
             unreachable!()
         };

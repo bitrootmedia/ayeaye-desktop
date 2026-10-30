@@ -12,7 +12,9 @@ use std::time::Duration;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::spinner::Spinner;
-use gpui_kit::component::{ActiveTheme as _, Icon, IconName, Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{
+    ActiveTheme as _, Icon, IconName, Sizable as _, WindowExt as _, h_flex, v_flex,
+};
 use gpui_kit::prelude::FluentBuilder as _;
 use gpui_kit::*;
 use jiff::Timestamp;
@@ -126,6 +128,28 @@ impl PersonView {
         self._tasks.push(task);
     }
 
+    /// Your DM with them, found or started on the server, opened in Chats.
+    fn message(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let client = self.ctx.client();
+        let org_id = self.ctx.org_id().to_owned();
+        let user_id = self.user_id.clone();
+        self._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_spawn(async move { client.open_direct(&org_id, &user_id) })
+                .await;
+            this.update_in(cx, |_, window, cx| match result {
+                Ok(chat) => cx.emit(Open::Chat {
+                    id: chat.id,
+                    org_id: None,
+                    preview: false,
+                }),
+                Err(e) if e.is_auth() => cx.emit(PersonViewEvent::AuthFailed(e)),
+                Err(e) => window.push_notification(format!("Couldn't open the chat: {e}"), cx),
+            })
+            .ok();
+        }));
+    }
+
     fn is_me(&self) -> bool {
         self.ctx.me() == Some(self.user_id.as_str())
     }
@@ -200,6 +224,16 @@ impl PersonView {
                                         ),
                                 )
                             })
+                            .child(
+                                Button::new("person-message")
+                                    .icon(Lucide::MessageCircle)
+                                    .label(if is_me { "Saved messages" } else { "Message" })
+                                    .small()
+                                    .when(!is_me, |b| b.primary())
+                                    .on_click(
+                                        cx.listener(|this, _, window, cx| this.message(window, cx)),
+                                    ),
+                            )
                             .child(
                                 Button::new("person-web")
                                     .icon(IconName::ExternalLink)

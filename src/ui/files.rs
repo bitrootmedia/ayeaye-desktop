@@ -30,7 +30,7 @@ use crate::ui::format::ago_long;
 
 /// The server's default `attachment_max_bytes`. Checked here only so a huge
 /// file isn't read into memory and sent just to be refused at confirm.
-const MAX_BYTES: u64 = 50 * 1024 * 1024;
+pub(crate) const MAX_BYTES: u64 = 50 * 1024 * 1024;
 
 pub enum FilesEvent {
     AuthFailed(ApiError),
@@ -475,7 +475,7 @@ pub fn drop_target<E: InteractiveElement + StatefulInteractiveElement>(
         })
 }
 
-fn file_name(path: &Path) -> String {
+pub(crate) fn file_name(path: &Path) -> String {
     path.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "file".into())
@@ -483,7 +483,7 @@ fn file_name(path: &Path) -> String {
 
 /// The types the server accepts (`ALLOWED_TYPES` in `models/conversation.py`),
 /// by extension; anything else would only be refused.
-fn content_type_for(path: &Path) -> Option<&'static str> {
+pub(crate) fn content_type_for(path: &Path) -> Option<&'static str> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
     Some(match ext.as_str() {
         "jpg" | "jpeg" => "image/jpeg",
@@ -501,7 +501,7 @@ fn content_type_for(path: &Path) -> Option<&'static str> {
     })
 }
 
-fn sniff_image(bytes: &[u8]) -> Option<ImageFormat> {
+pub(crate) fn sniff_image(bytes: &[u8]) -> Option<ImageFormat> {
     match bytes {
         [0x89, b'P', b'N', b'G', ..] => Some(ImageFormat::Png),
         [0xFF, 0xD8, 0xFF, ..] => Some(ImageFormat::Jpeg),

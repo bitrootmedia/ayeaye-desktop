@@ -192,6 +192,35 @@ fn is_html(body: &str) -> bool {
         && body.contains('>')
 }
 
+/// A body as one line of plain text, for a preview: tags dropped, the
+/// commonest entities decoded, whitespace folded.
+pub fn plain_line(body: &str) -> String {
+    let text = if is_html(body) {
+        let mut out = String::with_capacity(body.len());
+        let mut in_tag = false;
+        for c in body.chars() {
+            match c {
+                '<' => {
+                    in_tag = true;
+                    out.push(' ');
+                }
+                '>' if in_tag => in_tag = false,
+                _ if !in_tag => out.push(c),
+                _ => {}
+            }
+        }
+        out.replace("&amp;", "&")
+            .replace("&lt;", "<")
+            .replace("&gt;", ">")
+            .replace("&quot;", "\"")
+            .replace("&#39;", "'")
+            .replace("&nbsp;", " ")
+    } else {
+        body.to_owned()
+    };
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 /// Markdown syntax a plain sentence wouldn't have by accident. Plain text
 /// shouldn't go through markdown: its single line breaks would fold into
 /// one paragraph.
@@ -401,6 +430,15 @@ mod tests {
         assert_eq!(parse_day("+1"), Some(fmt_day(today + Duration::days(1))));
         assert!(parse_day("31/2").is_none());
         assert!(parse_day("soon").is_none());
+    }
+
+    #[::core::prelude::v1::test]
+    fn previews_are_one_plain_line() {
+        assert_eq!(
+            plain_line("<p>Keel &amp; <strong>hull</strong></p>\n<p>ok</p>"),
+            "Keel & hull ok"
+        );
+        assert_eq!(plain_line("a < b\n  and c"), "a < b and c");
     }
 
     #[::core::prelude::v1::test]

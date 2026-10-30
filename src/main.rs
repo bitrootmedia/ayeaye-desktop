@@ -6,6 +6,7 @@ mod actions;
 mod api;
 mod app_state;
 mod assets;
+mod chats;
 #[cfg(feature = "devtools")]
 mod devtools;
 mod home;

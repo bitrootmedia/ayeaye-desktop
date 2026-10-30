@@ -33,6 +33,8 @@ use crate::api::models::Organisation;
 use crate::api::{ApiClient, ApiError, clamp_title};
 use crate::app_state::AppState;
 use crate::assets::Lucide;
+use crate::chats::panel::{ChatsPanel, ChatsPanelEvent};
+use crate::chats::view::{ChatView, ChatViewEvent};
 use crate::home::HomeEvent;
 use crate::home::calendar::CalendarView;
 use crate::home::dashboard::DashboardView;
@@ -83,6 +85,7 @@ struct OrgModules {
     ctx: OrgCtx,
     notes_store: Entity<NotesStore>,
     notes: Entity<NotesPanel>,
+    chats: Entity<ChatsPanel>,
     tasks: Entity<TasksPanel>,
     projects: Entity<ProjectsPanel>,
     people: Entity<PeoplePanel>,
@@ -107,6 +110,7 @@ enum PromptKind {
     Spark,
     NewBook,
     NewArticle { book_id: String },
+    NewGroup,
 }
 
 enum Overlay {
@@ -378,7 +382,23 @@ impl Workspace {
         let people = cx.new(|cx| PeoplePanel::new(ctx.clone(), window, cx));
         let planner = cx.new(|cx| PlannerPanel::new(ctx.clone(), cx));
         let kb = cx.new(|cx| KbPanel::new(ctx.clone(), cx));
+        let chats = cx.new(|cx| ChatsPanel::new(ctx.clone(), window, cx));
         let subscriptions = vec![
+            cx.subscribe_in(&chats, window, |this, _, open: &Open, window, cx| {
+                this.open(open.clone(), window, cx)
+            }),
+            cx.subscribe_in(
+                &chats,
+                window,
+                |this, _, e: &ChatsPanelEvent, window, cx| match e {
+                    ChatsPanelEvent::NewGroup => this.show_prompt(PromptKind::NewGroup, window, cx),
+                    ChatsPanelEvent::AuthFailed(e) => {
+                        cx.emit(WorkspaceEvent::AuthRequired(e.clone()))
+                    }
+                },
+            ),
+            // The rail's count.
+            cx.observe(&chats, |_, _, cx| cx.notify()),
             cx.subscribe_in(&notes_store, window, Self::on_notes_event),
             cx.subscribe_in(&notes, window, Self::on_notes_panel_event),
             cx.subscribe_in(&tasks, window, |this, _, open: &Open, window, cx| {
@@ -450,6 +470,7 @@ impl Workspace {
             ctx,
             notes_store,
             notes,
+            chats,
             tasks,
             projects,
             people,
@@ -579,6 +600,10 @@ impl Workspace {
         | Open::Person {
             org_id: Some(org_id),
             ..
+        }
+        | Open::Chat {
+            org_id: Some(org_id),
+            ..
         } = &open
             && self.org.as_ref().map(|o| &o.id) != Some(org_id)
         {
@@ -606,7 +631,8 @@ impl Workspace {
             Open::Task { preview, .. }
             | Open::Article { preview, .. }
             | Open::Project { preview, .. }
-            | Open::Person { preview, .. } => (*preview, !*preview),
+            | Open::Person { preview, .. }
+            | Open::Chat { preview, .. } => (*preview, !*preview),
             _ => (false, true),
         };
         if let Some(key) = key_for(&open)
@@ -626,6 +652,7 @@ impl Workspace {
             Open::Article { id, .. } => self.article_item(id, window, cx),
             Open::Project { id, .. } => self.project_item(id, window, cx),
             Open::Person { id, .. } => self.person_item(id, window, cx),
+            Open::Chat { id, .. } => self.chat_item(id, window, cx),
             Open::Account => Some(self.account_item(window, cx)),
             Open::Home => self.home_item(window, cx),
             Open::Calendar => self.calendar_item(window, cx),
@@ -661,6 +688,11 @@ impl Workspace {
         let ctx = self.org_ctx()?;
         let timer = self.personal.timer.clone();
         let view = cx.new(|cx| TaskView::new(ctx, id, timer, window, cx));
+        self._subscriptions.push(cx.subscribe_in(
+            &view,
+            window,
+            |this, _, open: &Open, window, cx| this.open(open.clone(), window, cx),
+        ));
         self._subscriptions.push(cx.subscribe_in(
             &view,
             window,
@@ -824,6 +856,66 @@ impl Workspace {
             },
         ));
         Some(Box::new(view))
+    }
+
+    fn chat_item(
+        &mut self,
+        id: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Option<Box<dyn ItemHandle>> {
+        let ctx = self.org_ctx()?;
+        let view = cx.new(|cx| ChatView::new(ctx, id, window, cx));
+        self._subscriptions.push(cx.subscribe_in(
+            &view,
+            window,
+            |this, _, open: &Open, window, cx| this.open(open.clone(), window, cx),
+        ));
+        self._subscriptions.push(cx.subscribe_in(
+            &view,
+            window,
+            |this, view, e: &ChatViewEvent, window, cx| match e {
+                ChatViewEvent::Read(id) => {
+                    if let Some(m) = &this.modules {
+                        m.chats.update(cx, |p, cx| p.chat_read(id, cx));
+                    }
+                }
+                ChatViewEvent::Changed | ChatViewEvent::Left => {
+                    if let Some(m) = &this.modules {
+                        m.chats.update(cx, |p, cx| p.refresh(cx));
+                    }
+                    // A thread's first chat-side message shows on its task.
+                    let watch = view.read(cx).watch_key();
+                    if let Some(task) = watch.strip_prefix("task:") {
+                        let task = task.to_owned();
+                        this.reload_task_tabs(|id| id == task, window, cx);
+                    }
+                }
+                ChatViewEvent::AuthFailed(e) => cx.emit(WorkspaceEvent::AuthRequired(e.clone())),
+            },
+        ));
+        // The thread socket's watch needs the chat's kind, which arrives
+        // with its first load.
+        self._subscriptions
+            .push(cx.observe(&view, |this, view, cx| this.watch_front_chat(&view, cx)));
+        Some(Box::new(view))
+    }
+
+    /// While a chat is the front tab, its events come to the thread socket.
+    fn watch_front_chat(&mut self, view: &Entity<ChatView>, cx: &mut Context<Self>) {
+        let front = self.active_id("chat:", cx);
+        if front.as_deref() == Some(view.read(cx).chat_id()) {
+            let key = view.read(cx).watch_key();
+            self.realtime.update(cx, |r, _| r.watch_thread(Some(key)));
+        }
+    }
+
+    /// Open chat tabs whose conversation id passes `which`.
+    fn chat_views(&self, which: impl Fn(&str) -> bool, cx: &App) -> Vec<Entity<ChatView>> {
+        self.views::<ChatView>(cx)
+            .into_iter()
+            .filter(|v| which(v.read(cx).chat_id()))
+            .collect()
     }
 
     fn home_item(
@@ -1007,6 +1099,12 @@ impl Workspace {
                 "It starts as a private draft — publish it when it's ready.".into(),
                 Icon::new(Lucide::BookText),
             ),
+            PromptKind::NewGroup => (
+                format!("New group in {org}"),
+                "Group name",
+                "⏎ starts it with just you — add people from its header.".into(),
+                Icon::new(Lucide::MessagesSquare),
+            ),
         };
         let view = cx.new(|cx| PromptView::new(label, placeholder, hint, icon, window, cx));
         let k = kind.clone();
@@ -1074,6 +1172,28 @@ impl Workspace {
                         if let Some(m) = &this.modules {
                             m.kb.update(cx, |kb, cx| kb.refresh(cx));
                         }
+                    },
+                );
+            }
+            PromptKind::NewGroup => {
+                let Some(ctx) = self.org_ctx() else { return };
+                self.run(
+                    window,
+                    cx,
+                    move |c: &ApiClient| c.create_group(ctx.org_id(), &text, &[]),
+                    |this, chat, window, cx| {
+                        if let Some(m) = &this.modules {
+                            m.chats.update(cx, |p, cx| p.refresh(cx));
+                        }
+                        this.open(
+                            Open::Chat {
+                                id: chat.id,
+                                org_id: None,
+                                preview: false,
+                            },
+                            window,
+                            cx,
+                        );
                     },
                 );
             }
@@ -1318,6 +1438,12 @@ impl Workspace {
         for view in self.project_views(|_| true, cx) {
             view.update(cx, |v, cx| v.reload(window, cx));
         }
+        if let Some(m) = &self.modules {
+            m.chats.update(cx, |p, cx| p.refresh(cx));
+        }
+        for view in self.chat_views(|_| true, cx) {
+            view.update(cx, |v, cx| v.reload(window, cx));
+        }
         self.reload_home(cx);
         self.personal.inbox.update(cx, |i, cx| i.refresh(cx));
         self.personal.timer.update(cx, |t, cx| t.refresh(cx));
@@ -1355,6 +1481,22 @@ impl Workspace {
         self.reload_task_tabs(|id| nudges.tasks.contains(id), window, cx);
         for view in self.project_views(|id| nudges.projects.contains(id), cx) {
             view.update(cx, |v, cx| v.reload_comments(window, cx));
+        }
+        for view in self.chat_views(|id| nudges.chats.contains(id), cx) {
+            view.update(cx, |v, cx| v.reload(window, cx));
+        }
+        // A message moves the chat list and the rail's count. An event from
+        // before the server said which organisation counts as this one.
+        let chats_here = nudges.chat_orgs.is_empty()
+            || self
+                .org
+                .as_ref()
+                .is_some_and(|org| nudges.chat_orgs.contains(&org.id));
+        if nudges.messages
+            && chats_here
+            && let Some(m) = &self.modules
+        {
+            m.chats.update(cx, |p, cx| p.refresh(cx));
         }
         let here = self
             .org
@@ -1444,6 +1586,7 @@ impl Workspace {
                     Module::Tasks => m.tasks.update(cx, |t, cx| t.refresh(cx)),
                     Module::Projects => m.projects.update(cx, |p, cx| p.refresh(cx)),
                     Module::People => m.people.update(cx, |p, cx| p.refresh(cx)),
+                    Module::Chats => m.chats.update(cx, |p, cx| p.refresh(cx)),
                     _ => {}
                 }
             }
@@ -1479,11 +1622,19 @@ impl Workspace {
                 let project = self.active_id("project:", cx);
                 let person = self.active_id("person:", cx);
                 let spark = self.active_id("spark:", cx);
+                let chat = self.active_id("chat:", cx);
                 let thread = task
                     .as_ref()
                     .map(|id| format!("task:{id}"))
                     .or_else(|| project.as_ref().map(|id| format!("project:{id}")));
                 self.realtime.update(cx, |r, _| r.watch_thread(thread));
+                for view in self.chat_views(|_| true, cx) {
+                    let front = chat.as_deref() == Some(view.read(cx).chat_id());
+                    view.update(cx, |v, cx| v.set_visible(front, cx));
+                    if front {
+                        self.watch_front_chat(&view, cx);
+                    }
+                }
                 if let Some(m) = &self.modules {
                     m.notes.update(cx, |p, cx| p.set_active_note(note, cx));
                     m.tasks
@@ -1493,6 +1644,7 @@ impl Workspace {
                     m.projects
                         .update(cx, |p, cx| p.set_active_project(project, cx));
                     m.people.update(cx, |p, cx| p.set_active_person(person, cx));
+                    m.chats.update(cx, |p, cx| p.set_active_chat(chat, cx));
                 }
                 self.personal
                     .sparks
@@ -1689,6 +1841,14 @@ impl Workspace {
         }
     }
 
+    fn action_show_chats(&mut self, _: &ShowChats, window: &mut Window, cx: &mut Context<Self>) {
+        self.show_module(Module::Chats, window, cx);
+        if let Some(m) = &self.modules {
+            let chats = m.chats.clone();
+            chats.update(cx, |p, cx| p.focus_search(window, cx));
+        }
+    }
+
     fn action_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         self.pane
             .update(cx, |pane, cx| pane.close_active(window, cx));
@@ -1768,6 +1928,10 @@ impl Workspace {
             Module::People => {
                 let people = m.people.clone();
                 people.update(cx, |p, cx| p.focus_filter(window, cx));
+            }
+            Module::Chats => {
+                let chats = m.chats.clone();
+                chats.update(cx, |p, cx| p.focus_search(window, cx));
             }
             Module::Sparks => {
                 let sparks = self.personal.sparks.clone();
@@ -1991,19 +2155,29 @@ impl Workspace {
         let theme = cx.theme().clone();
         let unread = self.personal.inbox.read(cx).unread().max(0) as usize;
         let due = self.personal.reminders.read(cx).due_count();
+        let chats_unread = self
+            .modules
+            .as_ref()
+            .map_or(0, |m| m.chats.read(cx).unread().max(0) as usize);
         let button = |module: Module, ix: usize, cx: &mut Context<Self>| {
             let active = module == self.module;
             let count = match module {
                 Module::Inbox => unread,
                 Module::Reminders => due,
+                Module::Chats => chats_unread,
                 _ => 0,
+            };
+            let key = if module == Module::Chats {
+                "⌘⇧M".to_owned()
+            } else {
+                format!("⌘⌥{}", ix + 1)
             };
             let button = Button::new(SharedString::from(format!("module-{}", module.key())))
                 .icon(Icon::new(module.icon()))
                 .ghost()
                 .small()
                 .selected(active)
-                .tooltip(format!("{} (⌘⌥{})", module.label(), ix + 1))
+                .tooltip(format!("{} ({key})", module.label()))
                 .on_click(
                     cx.listener(move |this, _, window, cx| this.show_module(module, window, cx)),
                 );
@@ -2017,6 +2191,7 @@ impl Workspace {
                 button.into_any_element()
             }
         };
+        let chats = button(Module::Chats, 0, cx);
         let org_buttons: Vec<_> = Module::ORG
             .iter()
             .enumerate()
@@ -2068,6 +2243,7 @@ impl Workspace {
             .border_color(theme.border)
             .when(self.modules.is_some(), |this| {
                 this.children(pages)
+                    .child(chats)
                     .child(div().w(px(20.)).h(px(1.)).my_1().bg(theme.border))
             })
             .children(org_buttons)
@@ -2093,6 +2269,7 @@ impl Workspace {
                 Module::People => m.people.clone().into_any_element(),
                 Module::Planner => m.planner.clone().into_any_element(),
                 Module::Knowledge => m.kb.clone().into_any_element(),
+                Module::Chats => m.chats.clone().into_any_element(),
                 _ => m.notes.clone().into_any_element(),
             },
             None => v_flex()
@@ -2293,6 +2470,7 @@ impl Render for Workspace {
             .on_action(cx.listener(Self::action_capture_spark))
             .on_action(cx.listener(Self::action_search))
             .on_action(cx.listener(Self::action_show_module))
+            .on_action(cx.listener(Self::action_show_chats))
             .on_action(cx.listener(Self::action_open_account))
             .on_action(cx.listener(Self::action_open_home))
             .on_action(cx.listener(Self::action_open_calendar))

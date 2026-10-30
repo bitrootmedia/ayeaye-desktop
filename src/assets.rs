@@ -64,6 +64,13 @@ gpui_kit::assets::icon_assets!(
         TriangleAlert,
         CalendarClock,
         Activity,
+        MessageCircle,
+        MessagesSquare,
+        BellOff,
+        Reply,
+        PinOff,
+        Pencil,
+        Bookmark,
     ]
 );
 

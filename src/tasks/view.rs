@@ -25,6 +25,7 @@ use crate::timer::TimerState;
 use crate::ui::files::{FilesEvent, FilesPanel, drop_target};
 use crate::ui::format::ago_long;
 use crate::ui::item::{Item, ItemEvent};
+use crate::ui::open::Open;
 use crate::ui::widgets::{
     avatar, dot, field_cell, html_to_markdown, human_day, parse_day, picker, priority_color,
     quick_dates, rich_text, status_color,
@@ -41,6 +42,7 @@ pub enum TaskViewEvent {
 
 impl EventEmitter<ItemEvent> for TaskView {}
 impl EventEmitter<TaskViewEvent> for TaskView {}
+impl EventEmitter<Open> for TaskView {}
 
 pub struct TaskView {
     ctx: OrgCtx,
@@ -495,6 +497,23 @@ impl TaskView {
         }));
     }
 
+    /// The comments as a chat, in a tab of their own: made on the server if
+    /// nobody has commented yet.
+    fn open_chat(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.request(
+            window,
+            cx,
+            |c, org, id| c.task_chat(org, id),
+            |_, chat, _, cx| {
+                cx.emit(Open::Chat {
+                    id: chat.id,
+                    org_id: None,
+                    preview: false,
+                })
+            },
+        );
+    }
+
     fn on_reminder_date_event(
         &mut self,
         input: &Entity<InputState>,
@@ -686,6 +705,16 @@ impl TaskView {
                                 this.set_pinned(!pinned, window, cx)
                             }))
                     })
+                    .child(
+                        Button::new("task-chat")
+                            .icon(crate::assets::Lucide::MessageCircle)
+                            .label("Open in Chats")
+                            .ghost()
+                            .small()
+                            .on_click(
+                                cx.listener(|this, _, window, cx| this.open_chat(window, cx)),
+                            ),
+                    )
                     .child(
                         Button::new("web")
                             .icon(IconName::ExternalLink)

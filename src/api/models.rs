@@ -247,6 +247,21 @@ pub struct Message {
     pub deleted: bool,
     pub mine: bool,
     pub via: Option<String>,
+    /// Files posted with it; the same rows the task's Files panel lists.
+    pub attachments: Vec<FileItem>,
+    /// What it quotes, in a chat.
+    pub reply_to: Option<Reply>,
+}
+
+/// The message a reply quotes: enough for the strip above the bubble.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Reply {
+    pub id: String,
+    pub author: Option<Person>,
+    /// Trimmed by the server — a pointer, not a copy.
+    pub body: String,
+    pub deleted: bool,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -255,6 +270,119 @@ pub struct Thread {
     pub messages: Vec<Message>,
     pub can_post: bool,
 }
+
+// ------------------------------------------------------------------ chats
+
+/// One row of the chat list: a direct message, a group, or a task's or
+/// project's comment thread — the same conversations either way.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Chat {
+    /// The conversation's id, whatever its kind.
+    pub id: String,
+    /// `task`, `project`, `direct` or `group`.
+    pub kind: String,
+    /// The task's title, the project's name, the group's name, or — for a
+    /// DM — the other person (yourself: "Saved messages").
+    pub title: String,
+    pub task: Option<ChatTask>,
+    pub project_id: Option<String>,
+    /// Direct and group chats only; a thread's audience is its task's.
+    pub members: Vec<ChatMember>,
+    pub created_by: Option<String>,
+    pub last_message: Option<LastMessage>,
+    pub last_message_at: Option<DateTime<Utc>>,
+    pub unread: i64,
+    pub pinned: bool,
+    pub muted: bool,
+    pub archived: bool,
+    pub can_post: bool,
+}
+
+impl Chat {
+    /// The other side of a DM; `None` for your saved messages and for
+    /// anything that isn't a DM.
+    pub fn other<'a>(&'a self, me: Option<&str>) -> Option<&'a ChatMember> {
+        if self.kind != "direct" {
+            return None;
+        }
+        self.members.iter().find(|m| Some(m.id.as_str()) != me)
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatTask {
+    pub id: String,
+    pub status: String,
+    pub priority: String,
+    pub closed: bool,
+    pub project_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatMember {
+    pub id: String,
+    pub email: Option<String>,
+    pub display_name: Option<String>,
+    /// A socket open somewhere right now.
+    pub online: bool,
+    pub last_seen_at: Option<DateTime<Utc>>,
+}
+
+impl ChatMember {
+    pub fn name(&self) -> String {
+        self.display_name
+            .clone()
+            .filter(|n| !n.trim().is_empty())
+            .or_else(|| self.email.clone())
+            .unwrap_or_else(|| "Someone".into())
+    }
+}
+
+/// A chat's newest message, as the list previews it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LastMessage {
+    pub id: String,
+    pub author: Option<Person>,
+    pub body: String,
+    pub created_at: Option<DateTime<Utc>>,
+    pub deleted: bool,
+    pub mine: bool,
+    pub attachments: usize,
+}
+
+/// A page of a chat, oldest first within it.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatPage {
+    pub messages: Vec<Message>,
+    pub can_post: bool,
+    pub unread: i64,
+    /// Whether there's anything older than the first message here.
+    pub has_more: bool,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ChatUnread {
+    /// Chats with something unread, muted ones left out.
+    pub chats: i64,
+    pub messages: i64,
+}
+
+/// The chat list's tabs, as the server names them.
+pub const CHAT_FILTERS: &[(&str, &str)] = &[
+    ("all", "All"),
+    ("unread", "Unread"),
+    ("direct", "Direct"),
+    ("groups", "Groups"),
+    ("tasks", "Tasks"),
+    ("projects", "Projects"),
+    ("archived", "Archived"),
+];
 
 // ------------------------------------------------------------------- time
 
@@ -366,7 +494,7 @@ pub struct Revision {
 /// A file on a task (added directly or posted in a comment) or on one
 /// article revision. `url` is presigned and minted per read: open it, never
 /// keep it.
-#[derive(Clone, Debug, Default, PartialEq, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct FileItem {
     pub id: String,
@@ -462,6 +590,7 @@ pub struct Notification {
 #[derive(Clone, Debug, PartialEq)]
 pub enum LinkTarget {
     Task { org_id: String, task_id: String },
+    Chat { org_id: String, chat_id: String },
     Book { org_id: String, book_id: String },
     Person { org_id: String, user_id: String },
 }
@@ -472,6 +601,10 @@ pub fn parse_link(path: &str) -> Option<LinkTarget> {
         ["orgs", org, "tasks", task, ..] => Some(LinkTarget::Task {
             org_id: (*org).into(),
             task_id: (*task).into(),
+        }),
+        ["orgs", org, "chats", chat, ..] => Some(LinkTarget::Chat {
+            org_id: (*org).into(),
+            chat_id: (*chat).into(),
         }),
         ["orgs", org, "kb", "books", book, ..] => Some(LinkTarget::Book {
             org_id: (*org).into(),
@@ -850,7 +983,33 @@ mod tests {
                 user_id: "u1".into()
             })
         );
+        assert_eq!(
+            parse_link("/orgs/o1/chats/c1"),
+            Some(LinkTarget::Chat {
+                org_id: "o1".into(),
+                chat_id: "c1".into()
+            })
+        );
         assert_eq!(parse_link("/settings"), None);
+    }
+
+    #[::core::prelude::v1::test]
+    fn chats_decode_and_name_the_other_side() {
+        let chat: Chat = serde_json::from_str(
+            r#"{"id":"c","kind":"direct","title":"Sam","members":[{"id":"me","online":true},{"id":"u2","display_name":"Sam","last_seen_at":"2026-10-30T10:00:00Z"}],"last_message":{"id":"m","body":"hi","mine":false,"attachments":1},"unread":2,"pinned":true}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            chat.other(Some("me")).map(ChatMember::name),
+            Some("Sam".into())
+        );
+        assert!(chat.pinned && chat.unread == 2);
+        assert_eq!(chat.last_message.unwrap().attachments, 1);
+        let saved: Chat =
+            serde_json::from_str(r#"{"id":"c","kind":"direct","members":[{"id":"me"}]}"#).unwrap();
+        assert!(saved.other(Some("me")).is_none());
+        let page: ChatPage = serde_json::from_str(r#"{"messages":[{"id":"m","body":"x","reply_to":{"id":"r","body":"y","deleted":true}}],"has_more":true}"#).unwrap();
+        assert!(page.has_more && page.messages[0].reply_to.as_ref().unwrap().deleted);
     }
 
     #[::core::prelude::v1::test]

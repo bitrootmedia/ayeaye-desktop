@@ -1,4 +1,4 @@
-//! The endpoints behind tasks, projects, the knowledge base, sparks,
+//! The endpoints behind tasks, projects, chats, the knowledge base, sparks,
 //! reminders, the inbox, the timer, the planner, search, people, the
 //! dashboard, the calendar and the account. One method per call, a path
 //! and a decode: filtering, sorting and access are all the server's job.
@@ -53,6 +53,11 @@ fn query(pairs: &[(&str, Option<String>)]) -> String {
     } else {
         format!("?{}", parts.join("&"))
     }
+}
+
+/// Trimmed and cut to what the server's column holds.
+fn clamp(text: &str, max: usize) -> String {
+    text.trim().chars().take(max).collect()
 }
 
 fn encode(value: &str) -> String {
@@ -468,6 +473,165 @@ impl ApiClient {
 
     pub fn mark_all_read(&self) -> ApiResult<()> {
         self.post_empty("/api/notifications/read-all", &json!({}))
+    }
+
+    // ---------------------------------------------------------------- chats
+    //
+    // A chat is addressed by its conversation id whatever its kind, so a DM,
+    // a group and a task's comments open the same way. Editing and removing
+    // a message is the comment route, which works for all of them.
+
+    pub fn chats(
+        &self,
+        org_id: &str,
+        filter: &str,
+        q: &str,
+        limit: usize,
+        offset: usize,
+    ) -> ApiResult<(Vec<Chat>, usize)> {
+        let qs = query(&[
+            ("filter", Some(filter.to_owned())),
+            ("q", Some(q.to_owned()).filter(|q| !q.trim().is_empty())),
+            ("limit", Some(limit.to_string())),
+            ("offset", Some(offset.to_string())),
+        ]);
+        let (list, total): (Vec<Chat>, _) =
+            self.get_counted(&format!("{}/chats{qs}", org(org_id)))?;
+        let total = total.unwrap_or(list.len());
+        Ok((list, total))
+    }
+
+    pub fn chats_unread(&self, org_id: &str) -> ApiResult<ChatUnread> {
+        self.get(&format!("{}/chats/unread", org(org_id)))
+    }
+
+    pub fn chat(&self, org_id: &str, chat_id: &str) -> ApiResult<Chat> {
+        self.get(&format!("{}/chats/{chat_id}", org(org_id)))
+    }
+
+    /// Finds or starts your DM with somebody; yourself is saved messages.
+    pub fn open_direct(&self, org_id: &str, user_id: &str) -> ApiResult<Chat> {
+        self.post(
+            &format!("{}/chats/direct", org(org_id)),
+            &json!({ "user_id": user_id }),
+        )
+    }
+
+    pub fn create_group(&self, org_id: &str, title: &str, user_ids: &[String]) -> ApiResult<Chat> {
+        self.post(
+            &format!("{}/chats/groups", org(org_id)),
+            &json!({ "title": clamp(title, 120), "user_ids": user_ids }),
+        )
+    }
+
+    /// The chat behind a task's comments, made if nobody has commented yet.
+    pub fn task_chat(&self, org_id: &str, task_id: &str) -> ApiResult<Chat> {
+        self.post(&format!("{}/tasks/{task_id}/chat", org(org_id)), &json!({}))
+    }
+
+    pub fn rename_chat(&self, org_id: &str, chat_id: &str, title: &str) -> ApiResult<Chat> {
+        self.patch(
+            &format!("{}/chats/{chat_id}", org(org_id)),
+            &json!({ "title": clamp(title, 120) }),
+        )
+    }
+
+    pub fn add_chat_members(
+        &self,
+        org_id: &str,
+        chat_id: &str,
+        user_ids: &[String],
+    ) -> ApiResult<Chat> {
+        self.post(
+            &format!("{}/chats/{chat_id}/members", org(org_id)),
+            &json!({ "user_ids": user_ids }),
+        )
+    }
+
+    /// Leaving is your own id; only whoever started a group removes others.
+    pub fn remove_chat_member(&self, org_id: &str, chat_id: &str, user_id: &str) -> ApiResult<()> {
+        self.delete(&format!(
+            "{}/chats/{chat_id}/members/{user_id}",
+            org(org_id)
+        ))
+    }
+
+    /// Pinned, muted, archived — yours alone. `None` leaves one as it is.
+    pub fn set_chat_state(&self, org_id: &str, chat_id: &str, fields: Value) -> ApiResult<()> {
+        self.put_empty(&format!("{}/chats/{chat_id}/state", org(org_id)), &fields)
+    }
+
+    /// The newest page, or the one before `before`; oldest first within it.
+    pub fn chat_messages(
+        &self,
+        org_id: &str,
+        chat_id: &str,
+        before: Option<&str>,
+        limit: usize,
+    ) -> ApiResult<ChatPage> {
+        let qs = query(&[
+            ("before", before.map(str::to_owned)),
+            ("limit", Some(limit.to_string())),
+        ]);
+        self.get(&format!("{}/chats/{chat_id}/messages{qs}", org(org_id)))
+    }
+
+    pub fn send_chat_message(
+        &self,
+        org_id: &str,
+        chat_id: &str,
+        body: &str,
+        attachment_ids: &[String],
+        reply_to_id: Option<&str>,
+    ) -> ApiResult<Message> {
+        self.post(
+            &format!("{}/chats/{chat_id}/messages", org(org_id)),
+            &json!({
+                "body": body,
+                "attachment_ids": attachment_ids,
+                "reply_to_id": reply_to_id,
+            }),
+        )
+    }
+
+    /// Up to and including `message_id`, or the newest when `None`.
+    pub fn mark_chat_read(
+        &self,
+        org_id: &str,
+        chat_id: &str,
+        message_id: Option<&str>,
+    ) -> ApiResult<()> {
+        self.post_empty(
+            &format!("{}/chats/{chat_id}/read", org(org_id)),
+            &json!({ "message_id": message_id }),
+        )
+    }
+
+    /// Step 1 of a chat upload; steps 2 and 3 are every upload's.
+    pub fn stage_chat_attachment(
+        &self,
+        org_id: &str,
+        chat_id: &str,
+        filename: &str,
+        content_type: &str,
+    ) -> ApiResult<UploadTicket> {
+        self.post(
+            &format!("{}/chats/{chat_id}/attachments", org(org_id)),
+            &json!({ "filename": filename, "content_type": content_type }),
+        )
+    }
+
+    /// Your own words, in any conversation.
+    pub fn edit_message(&self, org_id: &str, message_id: &str, body: &str) -> ApiResult<Message> {
+        self.patch(
+            &format!("{}/comments/{message_id}", org(org_id)),
+            &json!({ "body": body }),
+        )
+    }
+
+    /// Soft: the message stays in order as "deleted".
+    pub fn delete_message(&self, org_id: &str, message_id: &str) -> ApiResult<()> {
+        self.delete(&format!("{}/comments/{message_id}", org(org_id)))
     }
 
     // --------------------------------------------------------------- search

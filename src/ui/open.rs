@@ -27,6 +27,13 @@ pub enum Open {
         id: String,
         preview: bool,
     },
+    /// A conversation by its id — a DM, a group or a thread. `org_id` as
+    /// for a task.
+    Chat {
+        id: String,
+        org_id: Option<String>,
+        preview: bool,
+    },
     /// A colleague's page. `org_id` as for a task.
     Person {
         id: String,
@@ -59,6 +66,7 @@ pub fn key_for(open: &Open) -> Option<SharedString> {
             Open::Task { id, .. } => format!("task:{id}"),
             Open::Article { id, .. } => format!("article:{id}"),
             Open::Project { id, .. } => format!("project:{id}"),
+            Open::Chat { id, .. } => format!("chat:{id}"),
             Open::Person { id, .. } => format!("person:{id}"),
             Open::Account => "account:me".to_owned(),
             Open::Home => "home:dashboard".to_owned(),
@@ -88,6 +96,11 @@ pub fn open_for_key(key: &str) -> Option<Open> {
         },
         "article" => Open::Article { id, preview: false },
         "project" => Open::Project { id, preview: false },
+        "chat" => Open::Chat {
+            id,
+            org_id: None,
+            preview: false,
+        },
         "person" => Open::Person {
             id,
             org_id: None,
@@ -113,6 +126,7 @@ mod tests {
             "task:2",
             "article:3",
             "project:5",
+            "chat:7",
             "person:6",
             "account:me",
             "home:dashboard",

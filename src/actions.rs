@@ -31,6 +31,7 @@ gpui_kit::actions!(
         OpenAccount,
         OpenHome,
         OpenCalendar,
+        ShowChats,
     ]
 );
 
@@ -69,12 +70,15 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-,", OpenAccount, ws),
         KeyBinding::new("secondary-shift-h", OpenHome, ws),
         KeyBinding::new("secondary-shift-c", OpenCalendar, ws),
+        KeyBinding::new("secondary-shift-m", ShowChats, ws),
         KeyBinding::new("secondary-q", Quit, None),
         // Lists with a filter field: the arrows move the selection, not the
         // caret. "X > Input" outranks the Input's own up/down.
         KeyBinding::new("up", SelectPrev, Some("NotesPanel > Input")),
         KeyBinding::new("down", SelectNext, Some("NotesPanel > Input")),
         KeyBinding::new("escape", Cancel, Some("NotesPanel")),
+        KeyBinding::new("up", SelectPrev, Some("ChatsPanel > Input")),
+        KeyBinding::new("down", SelectNext, Some("ChatsPanel > Input")),
         KeyBinding::new("up", SelectPrev, Some("QuickOpen > Input")),
         KeyBinding::new("down", SelectNext, Some("QuickOpen > Input")),
         KeyBinding::new("ctrl-p", SelectPrev, Some("QuickOpen > Input")),
@@ -136,6 +140,7 @@ pub fn set_menus(cx: &mut App) {
         Menu::new("View").items([
             MenuItem::action("Home", OpenHome),
             MenuItem::action("Calendar", OpenCalendar),
+            MenuItem::action("Chats", ShowChats),
             MenuItem::separator(),
             MenuItem::action("Notes", ShowModule(0)),
             MenuItem::action("Tasks", ShowModule(1)),

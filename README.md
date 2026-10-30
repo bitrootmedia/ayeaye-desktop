@@ -15,6 +15,22 @@ tab:
 - **Calendar** (⌘⇧C) — a six-week month grid of every visible task's due
   date, who's away, and your own reminders; click a day for all of it.
 
+Under them, **Chats** (⌘⇧M), Telegram's two columns: the list in the
+sidebar — direct messages, groups, and every task and project thread you
+have a stake in, pinned first, then whatever moved last, with the newest line
+and what's unread (the count is on the rail) — filtered All, Unread, Direct,
+Groups, Tasks, Projects or Archived, and searched by name *or by what was
+said*. A chat opens in a tab: your messages on the right, a line between
+days, a quoted strip over a reply, older pages as you scroll up; Return
+sends, Shift-Return is a new line; right-click a message to reply, copy,
+edit or delete your own; attach files with the clip. A DM's header says
+whether they're online or when they were last seen; a group can be renamed
+in place, people added, left; any chat pinned, muted or archived from its
+`⋯`. A task thread in Chats is exactly its comments — "Open in Chats" on a
+task, "Message" on a person's page, and a chat notification in the inbox all
+land here. An organisation admin can open every task but nobody's DM; that's
+the server's rule, not this app's.
+
 Below them are the modules. The organisation's:
 
 - **Notes** — the notepad that replaces a folder of loose text files
@@ -109,6 +125,7 @@ Type `http://localhost` as the server. `http://` is warned about, never blocked.
 | ⌘⌥1–9 | Notes, Tasks, Projects, People, Planner, Knowledge base, Sparks, Reminders, Inbox |
 | ⌘, | Your account |
 | ⌘⇧H / ⌘⇧C | Home / Calendar |
+| ⌘⇧M | Chats, with the search focused; ↑/↓ and Return pick one |
 | ⌘P / ⌘K | Find a note; Return on no match creates one with that title |
 | ⌘⇧E | Focus the sidebar's filter (in Notes, ↑/↓ preview as you go) |
 | ⌘W, ⌘⇧T | Close tab, reopen the last closed one |
@@ -141,6 +158,7 @@ src/
                 open (every "open this"), quick open, search, prompt, widgets
   notes/        Notes: store, sidebar panel, editor
   tasks/        Tasks: list panel, planner panel, task view
+  chats/        Chats: the list panel, a chat in a tab
   kb/           Knowledge base: books panel, article view
   personal/     sparks, reminders, inbox
   theme.rs      Zed's One Dark / One Light (assets/themes/one.json)
@@ -173,7 +191,10 @@ task tabs, the list in front, the inbox and timer (at most every 10 s). A
 refetch that 404s is how revoked access shows up. Two sockets, because the
 server keeps one watch per socket: one watches `org:<id>` (every task change
 in the organisation), the other `task:<id>` for the front tab (comments only
-go to stakeholders and whoever has the task open). After a drop, everything
+go to stakeholders and whoever has the task open) — or, for a chat in front,
+its task, its project or `chat:<id>`. Every message in your own chats is
+addressed to you, so the list and the rail's count move on any of them, and
+an open chat refetches its newest page. After a drop, everything
 on screen is refetched, since events were missed. The socket thread
 (`api/socket.rs`) is blocking tungstenite with a short read timeout, pinging
 every 30 s so a laptop waking up finds its dead socket.
@@ -252,13 +273,19 @@ points), `scroll`, `quit`. `AYEAYE_CONFIG_DIR` keeps a run away from your real p
 
 ## Not done
 
-- Live updates cover tasks, comments and the planner — what the server
-  announces. Notes, sparks, reminders, the knowledge base and notifications
+- Live updates cover tasks, comments, chats and the planner — what the
+  server announces. Presence (the green dot) is refetched with the list and
+  the chat header, once a minute, not pushed. No typing indicators, and no
+  native macOS notification for a new message yet — the inbox and the rail's
+  count are how one reaches you.
+- In a chat, pictures show inline from their thumbnail; other files, voice
+  notes included, are a name and size that opens in the browser — no
+  playback here yet. Notes, sparks, reminders, the knowledge base and notifications
   have no events, so they refresh on ⌘R, window focus, module switch, and
   (inbox, timer) a minute's poll or a nearby task event.
 - Not in tasks yet: attachments and files, dependencies, recurrence, tags,
   time entries, the board and calendar views, creating projects. Comments
-  can't be edited or deleted here.
+  can't be edited or deleted from the task's own pane — open it in Chats.
 - The KB can't share books, manage access or attach files — the web app does.
 - The inbox has been tested against an empty inbox only; opening a
   notification relies on its `link_path` (`/orgs/<org>/tasks/<id>`), anything
